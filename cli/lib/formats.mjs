@@ -4,6 +4,8 @@
  * Camera letter maps to Avid bin colour for visual identification.
  */
 
+import { tcToFrames, tcEnd, framesToTc } from './tc.mjs'
+
 // Avid colour per camera letter
 const CAM_COLORS = {
   A: 'Cyan',
@@ -35,20 +37,13 @@ function fpsToFrameDuration(fps) {
   return map[key] ?? `1/${Math.round(fps)}s`
 }
 
-function tcToFrames(tc, fps) {
-  const [h, m, s, f] = tc.split(':').map(Number)
-  return ((h * 3600 + m * 60 + s) * Math.round(fps)) + f
-}
-
 /**
  * Build an ALE for a single story.
- * @param {object[]} clips  - clips with .cam, .name, .tape, .start, .end, .duration, .fps
- * @param {string}   fps    - session frame rate
- * @param {string}   slug   - story slug (for heading comment)
- * @param {string}   date   - MMDD
+ * clips come from clipsBySlug — Supabase field names (start_tc, end_tc, duration_tc, etc.)
+ * Relay_Group column is passed through harmlessly by Avid and aids debugging.
  */
 export function buildALE(clips, fps, slug, date) {
-  const COLUMNS = ['Name', 'Tape', 'Start', 'End', 'Duration', 'Tracks', 'FPS', 'Color']
+  const COLUMNS = ['Name', 'Tape', 'Start', 'End', 'Duration', 'Tracks', 'FPS', 'Color', 'Relay_Group']
 
   const lines = [
     'Heading',
@@ -64,15 +59,31 @@ export function buildALE(clips, fps, slug, date) {
   ]
 
   for (const clip of clips) {
+    // relay_part > 1 are filtered by clipsBySlug; guard here in case called directly
+    if ((clip.relay_part ?? 0) > 1) continue
+
+    let start    = clip.start_tc
+    let end      = clip.end_tc
+    let duration = clip.duration_tc
+
+    // For relay part-1: use combined duration / end TC
+    if (clip.relay_combined_duration_sec != null) {
+      const clipFps   = parseFloat(clip.fps ?? fps)
+      const totFrames = Math.round(clip.relay_combined_duration_sec * clipFps)
+      end      = tcEnd(start, totFrames, String(clipFps))
+      duration = framesToTc(totFrames, String(clipFps))
+    }
+
     lines.push([
       clip.name,
       clip.tape,
-      clip.start,
-      clip.end,
-      clip.duration,
+      start,
+      end,
+      duration,
       'VA1A2',
-      clip.fps,
+      clip.fps ?? fps,
       camColor(clip.cam),
+      clip.relay_group ?? '',
     ].join('\t'))
   }
 
@@ -88,25 +99,33 @@ export function buildFCPXML(clips, fps, slug, date, outputRoot) {
   const isoDate  = new Date().toISOString().slice(0, 10)
   const eventName = `${date}_${slug}`
 
-  const assets = clips.map((clip, i) => {
-    const durFrames = tcToFrames(clip.duration, fRate)
+  // Filter relay continuations before building XML
+  const visibleClips = clips.filter(c => (c.relay_part ?? 0) <= 1)
+
+  const assets = visibleClips.map((clip, i) => {
+    let durSec = clip.duration_sec ?? 0
+    if (clip.relay_combined_duration_sec != null) durSec = clip.relay_combined_duration_sec
+    const durFrames = Math.round(durSec * fRate)
     const durStr    = `${durFrames}/${Math.round(fRate)}s`
-    const src       = xmlEscape(clip.proxyPath ?? clip.filePath)
+    const src       = xmlEscape(clip.proxy_path ?? clip.file_path ?? '')
     return `    <asset id="r${i + 2}" name="${xmlEscape(clip.name)}" start="0s" duration="${durStr}" hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">
       <media-rep kind="original-media" src="file://${src}"/>
       <metadata>
         <md key="com.apple.proapps.studio.reel" value="${xmlEscape(clip.tape)}"/>
         <md key="com.postie.camera"             value="${clip.cam}"/>
-        <md key="com.postie.card"               value="${String(clip.cardNum).padStart(3,'0')}"/>
+        <md key="com.postie.card"               value="${String(clip.cardNum ?? clip.card_num ?? 1).padStart(3,'0')}"/>
         <md key="com.postie.slug"               value="${slug}"/>
-        <md key="com.postie.startTC"            value="${clip.start}"/>
+        <md key="com.postie.startTC"            value="${clip.start_tc}"/>
         <md key="com.postie.codec"              value="${xmlEscape(clip.codec ?? '')}"/>
+        ${clip.relay_group ? `<md key="com.postie.relayGroup" value="${clip.relay_group}"/>` : ''}
       </metadata>
     </asset>`
   }).join('\n')
 
-  const clipEls = clips.map((clip, i) => {
-    const durFrames = tcToFrames(clip.duration, fRate)
+  const clipEls = visibleClips.map((clip, i) => {
+    let durSec = clip.duration_sec ?? 0
+    if (clip.relay_combined_duration_sec != null) durSec = clip.relay_combined_duration_sec
+    const durFrames = Math.round(durSec * fRate)
     return `        <clip name="${xmlEscape(clip.name)}" ref="r${i + 2}" duration="${durFrames}/${Math.round(fRate)}s" tcFormat="NDF"/>`
   }).join('\n')
 

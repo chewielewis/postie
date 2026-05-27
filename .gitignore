@@ -42,3 +42,6 @@ next-env.d.ts
 
 # LUT files — licensed, not for distribution
 cli/luts/*.cube
+
+# CLI env
+cli/.env

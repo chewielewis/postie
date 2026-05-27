@@ -14,12 +14,13 @@ import { basename }                              from 'path'
 import { parseArgs }                             from 'util'
 import { randomUUID }                            from 'crypto'
 
-import { loadDb, saveDb, getSlugs, addSlug,
-         getOrCreateSession, getSession,
-         addCard, updateCardStatus, updateClipSlug,
-         clipsBySlug }                           from './lib/db.mjs'
+import { getShow, getSlugs, addSlug,
+         getOrCreateSession, getSession, getSessionWithCards,
+         nextCardNum, addCard, updateCardStatus,
+         addClip, clipsBySlug }                  from './lib/db.mjs'
+import { detectRelays }                          from './lib/relay.mjs'
 import { buildALE, buildFCPXML }                 from './lib/formats.mjs'
-import { scanCard, backupCard, transcodeCard }   from './lib/ingest.mjs'
+import { scanCard, backupCard, transcodeCard, transcodeRelayGroup } from './lib/ingest.mjs'
 import { join, resolve }                         from 'path'
 import { mkdirSync }                             from 'fs'
 
@@ -49,6 +50,8 @@ if (!args.show) {
 
 const SHOW = args.show.toUpperCase()
 const PORT = parseInt(args.port)
+
+let show = null  // loaded on server start
 
 // ---------------------------------------------------------------------------
 // In-memory job state (SSE clients + scan results awaiting confirmation)
@@ -461,7 +464,7 @@ document.getElementById('sessionForm').addEventListener('submit', async e => {
   session = j.session
   db      = j.db
   renderSlugs()
-  document.getElementById('sessionInfo').textContent = session.date + ' — ' + (session.output.split('/').pop() || session.output)
+  document.getElementById('sessionInfo').textContent = session.date + ' — ' + (session.output_path.split('/').pop() || session.output_path)
   showPanel('scan')
 })
 
@@ -810,37 +813,42 @@ const server = createServer(async (req, res) => {
 
   // DB snapshot
   if (req.method === 'GET' && url.pathname === '/api/db') {
-    json(loadDb(SHOW))
+    const slugs = await getSlugs(show.id)
+    json({ slugs })
     return
   }
 
   // Add slug
   if (req.method === 'POST' && url.pathname === '/api/slug') {
     const { name } = await body()
-    const db = loadDb(SHOW)
-    addSlug(db, name)
-    saveDb(SHOW, db)
-    json(db)
+    await addSlug(show.id, name)
+    const slugs = await getSlugs(show.id)
+    json({ slugs })
     return
   }
 
   // Create/get session
   if (req.method === 'POST' && url.pathname === '/api/session') {
     const params = await body()
-    const db     = loadDb(SHOW)
     const today  = new Date()
     const date   = params.date || (String(today.getMonth()+1).padStart(2,'0') + String(today.getDate()).padStart(2,'0'))
-    const session = getOrCreateSession(db, { ...params, date })
-    saveDb(SHOW, db)
-    json({ session, db })
+    const session = await getOrCreateSession(show.id, {
+      date,
+      outputPath: params.output,
+      backupPath: params.backup ?? null,
+      avidPath:   params.avid   ?? null,
+      logPreset:  params.log    ?? 'none',
+      fps:        params.fps    ?? '25',
+    })
+    const slugs = await getSlugs(show.id)
+    json({ session, db: { slugs } })
     return
   }
 
   // Get session
   if (req.method === 'GET' && url.pathname.startsWith('/api/session/')) {
     const sessionId = url.pathname.split('/api/session/')[1]
-    const db        = loadDb(SHOW)
-    const session   = getSession(db, sessionId)
+    const session   = await getSessionWithCards(sessionId)
     if (!session) { json({ error: 'Session not found' }, 404); return }
     json(session)
     return
@@ -848,9 +856,8 @@ const server = createServer(async (req, res) => {
 
   // Scan a card
   if (req.method === 'POST' && url.pathname === '/api/scan') {
-    const params    = await body()
-    const db        = loadDb(SHOW)
-    const session   = getSession(db, params.sessionId)
+    const params  = await body()
+    const session = await getSession(params.sessionId)
     if (!session) { json({ error: 'Session not found' }, 404); return }
 
     const scanId = randomUUID()
@@ -867,8 +874,8 @@ const server = createServer(async (req, res) => {
         cardNum:   params.cardNum,
         date:      session.date,
         slug:      params.defaultSlug,
-        output:    session.output,
-        log:       session.log,
+        output:    session.output_path,
+        log:       session.log_preset,
         fps:       session.fps,
       },
       (event) => {
@@ -906,21 +913,37 @@ const server = createServer(async (req, res) => {
   // Commit scan → add card to session
   if (req.method === 'POST' && url.pathname === '/api/scan-commit') {
     const { sessionId, scanId, clips: assignments } = await body()
-    const db      = loadDb(SHOW)
-    const session = getSession(db, sessionId)
-    if (!session) { json({ error: 'Session not found' }, 404); return }
-
     const scan = scans.get(scanId)
     if (!scan) { json({ error: 'Scan not found' }, 404); return }
 
-    // Apply slug assignments
+    // Apply slug assignments back to scan clips
     for (const clip of scan.clips) {
       const assign = assignments.find(a => a.name === clip.name)
       if (assign) clip.slug = assign.slug
     }
 
-    addCard(session, { inputPath: scan.params.inputPath, cam: scan.params.cam, clips: scan.clips })
-    saveDb(SHOW, db)
+    const cardNum = await nextCardNum(sessionId, scan.params.cam)
+    const card    = await addCard(sessionId, {
+      inputPath: scan.params.inputPath,
+      cam:       scan.params.cam,
+      cardNum,
+    })
+
+    const slugs = await getSlugs(show.id)
+    for (const clip of scan.clips) {
+      const slugRow = slugs.find(s => s.name === clip.slug)
+      await addClip(card.id, { ...clip, slugId: slugRow?.id ?? null })
+    }
+
+    // Run relay detection across all cards in this session (idempotent)
+    const session = await getSession(sessionId)
+    if (session) {
+      const relays = await detectRelays(sessionId, session.fps ?? '25')
+      if (relays.length > 0) {
+        console.log(`[relay] ${relays.length} span(s) detected in session ${sessionId}`)
+      }
+    }
+
     json({ ok: true })
     return
   }
@@ -928,8 +951,7 @@ const server = createServer(async (req, res) => {
   // Start ingest
   if (req.method === 'POST' && url.pathname === '/api/ingest') {
     const { sessionId } = await body()
-    const db            = loadDb(SHOW)
-    const session       = getSession(db, sessionId)
+    const session       = await getSessionWithCards(sessionId)
     if (!session) { json({ error: 'Session not found' }, 404); return }
 
     const jobId = createJob()
@@ -939,53 +961,116 @@ const server = createServer(async (req, res) => {
     ;(async () => {
       const emit = (type, data) => emitToJob(jobId, type, data)
 
+      // Re-run relay detection with all cards present before transcoding
+      await detectRelays(sessionId, session.fps ?? '25')
+
+      // Collect all clips across all cards, build relay group map
+      const allClips = session.cards.flatMap(card =>
+        card.clips.map(clip => ({ ...clip, cardData: card }))
+      )
+      const relayGroupMap = {}
+      for (const clip of allClips) {
+        if (clip.relay_group) {
+          ;(relayGroupMap[clip.relay_group] = relayGroupMap[clip.relay_group] ?? []).push(clip)
+        }
+      }
+      for (const parts of Object.values(relayGroupMap)) {
+        parts.sort((a, b) => (a.relay_part ?? 1) - (b.relay_part ?? 1))
+      }
+
+      const transcodeOpts = {
+        date:   session.date,
+        output: session.output_path,
+        avid:   session.avid_path,
+        log:    session.log_preset,
+        fps:    session.fps ?? '25',
+      }
+
       for (const card of session.cards) {
         if (card.status === 'complete') continue
 
-        updateCardStatus(session, card.id, 'ingesting')
-        saveDb(SHOW, db)
+        await updateCardStatus(card.id, 'ingesting')
 
-        // 1. Backup
+        // 1. Backup all originals on this card
         emit('backup', { cardId: card.id })
         try {
-          await backupCard({ card, date: session.date, backupRoot: session.backup }, (ev) => emit(ev.type, ev.data))
+          await backupCard({ card, date: session.date, backupRoot: session.backup_path }, (ev) => emit(ev.type, ev.data))
         } catch (e) {
           emit('log', `Backup warning: ${e.message}`)
         }
 
-        // 2. Transcode → stage → move
+        // 2. Transcode clips on this card
         let index = 0
         for (const clip of card.clips) {
           index++
+
+          // Skip relay continuations — they will be merged into part 1's proxy
+          if ((clip.relay_part ?? 0) > 1) {
+            emit('log', `[${clip.name}] relay part ${clip.relay_part} — merged into part 1 proxy`)
+            continue
+          }
+
           emit('transcode', { cardId: card.id, clip: clip.name, index, total: card.clips.length, status: 'started' })
           emit('log', `[${index}/${card.clips.length}] ${clip.name}`)
+
           try {
-            await transcodeCard(
-              { card: { ...card, clips: [clip] }, date: session.date, output: session.output, avid: session.avid, log: session.log, fps: session.fps },
-              (ev) => emit(ev.type, { ...ev.data, cardId: card.id })
-            )
+            if (clip.relay_group && clip.relay_part === 1) {
+              // Relay part 1 — concat all parts with filter_complex
+              const parts = relayGroupMap[clip.relay_group] ?? [clip]
+              await transcodeRelayGroup(
+                { parts, ...transcodeOpts },
+                (ev) => emit(ev.type, { ...ev.data, cardId: card.id })
+              )
+            } else {
+              await transcodeCard(
+                { card: { ...card, clips: [clip] }, ...transcodeOpts },
+                (ev) => emit(ev.type, { ...ev.data, cardId: card.id })
+              )
+            }
             emit('transcode', { cardId: card.id, clip: clip.name, index, total: card.clips.length, status: 'done' })
           } catch (e) {
             emit('log', `Error on ${clip.name}: ${e.message}`)
           }
         }
 
-        updateCardStatus(session, card.id, 'complete')
-        saveDb(SHOW, db)
+        await updateCardStatus(card.id, 'complete')
         emit('card-done', { cardId: card.id })
       }
 
-      // Build combined per-story ALEs
-      const storyMap = clipsBySlug(session)
+      // Write relay sidecar manifest to output root
+      const allRelayGroups = Object.values(relayGroupMap).filter(p => p.length > 1)
+      if (allRelayGroups.length > 0) {
+        const manifest = {
+          session: sessionId,
+          date:    session.date,
+          relays:  allRelayGroups.map(parts => ({
+            relay_group: parts[0].relay_group,
+            parts: parts.map(p => ({
+              relay_part: p.relay_part,
+              clip_name:  p.name,
+              file_path:  p.file_path,
+              start_tc:   p.start_tc,
+              end_tc:     p.end_tc,
+              card:       p.cardData?.card_num ?? p.card_num,
+            })),
+          })),
+        }
+        mkdirSync(session.output_path, { recursive: true })
+        writeFileSync(join(session.output_path, 'session-relays.json'), JSON.stringify(manifest, null, 2), 'utf8')
+        emit('log', `Relay manifest: session-relays.json (${allRelayGroups.length} group(s))`)
+      }
+
+      // Build per-story ALEs
+      const storyMap = await clipsBySlug(sessionId)
       const stories  = []
 
-      mkdirSync(session.output, { recursive: true })
+      mkdirSync(session.output_path, { recursive: true })
 
       for (const [slug, clips] of Object.entries(storyMap)) {
         const aleContent    = buildALE(clips, session.fps, slug, session.date)
-        const fcpxmlContent = buildFCPXML(clips, session.fps, slug, session.date, session.output)
-        const alePath       = join(session.output, `${session.date}_${slug}.ale`)
-        const fcpxmlPath    = join(session.output, `${session.date}_${slug}.fcpxml`)
+        const fcpxmlContent = buildFCPXML(clips, session.fps, slug, session.date, session.output_path)
+        const alePath       = join(session.output_path, `${session.date}_${slug}.ale`)
+        const fcpxmlPath    = join(session.output_path, `${session.date}_${slug}.fcpxml`)
 
         writeFileSync(alePath,    aleContent,    'utf8')
         writeFileSync(fcpxmlPath, fcpxmlContent, 'utf8')
@@ -1037,6 +1122,11 @@ const server = createServer(async (req, res) => {
   res.end()
 })
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\nPostie Rushes — ${SHOW}\nhttp://localhost:${PORT}\n`)
+server.listen(PORT, '0.0.0.0', async () => {
+  show = await getShow(SHOW)
+  if (!show) {
+    console.error(`Show '${SHOW}' not found in database. Add it to the shows table first.`)
+    process.exit(1)
+  }
+  console.log(`\nPostie Rushes — ${show.name ?? SHOW}\nhttp://localhost:${PORT}\n`)
 })
