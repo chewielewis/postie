@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * postie-rushes  —  PGHI ingest tool
+ * postie-rushes  —  camera card ingest tool
  *
- * Usage:  node rushes.mjs --ui [--show PGHI] [--port 4321]
+ * Usage:  node rushes.mjs --ui --show <CODE> [--port 4321]
  *         node rushes.mjs --help
  *
  * Requirements: Node.js 18+, ffmpeg (brew install ffmpeg)
@@ -30,7 +30,7 @@ import { mkdirSync }                             from 'fs'
 const { values: args } = parseArgs({
   options: {
     ui:    { type: 'boolean', default: true },
-    show:  { type: 'string',  default: 'PGHI' },
+    show:  { type: 'string' },
     port:  { type: 'string',  default: '4321' },
     help:  { type: 'boolean', default: false },
   },
@@ -38,8 +38,13 @@ const { values: args } = parseArgs({
 })
 
 if (args.help) {
-  console.log('Usage: node rushes.mjs [--show PGHI] [--port 4321]\nOpen http://localhost:<port> in a browser.')
+  console.log('Usage: node rushes.mjs --show <CODE> [--port 4321]\nOpen http://localhost:<port> in a browser.')
   process.exit(0)
+}
+
+if (!args.show) {
+  console.error('Error: --show <CODE> is required (e.g. --show PGHI)')
+  process.exit(1)
 }
 
 const SHOW = args.show.toUpperCase()
@@ -281,7 +286,7 @@ input::placeholder { color:var(--m2) }
         </div>
         <div class="field">
           <label>Backup drive</label>
-          <input name="backup" placeholder="/Volumes/PGHI_BACKUP">
+          <input name="backup" placeholder="/Volumes/SHOW_BACKUP">
           <span class="hint">Camera originals are copied here before transcoding</span>
         </div>
         <div class="field">
