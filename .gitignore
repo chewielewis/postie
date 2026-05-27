@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# LUT files — licensed, not for distribution
+cli/luts/*.cube

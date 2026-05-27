@@ -1,0 +1,12 @@
+{
+  "name": "postie-rushes",
+  "version": "0.1.0",
+  "description": "Scan a drive, generate DNxHR LB proxies, export ALE and FCPXML for Avid and DaVinci Resolve",
+  "type": "module",
+  "bin": {
+    "postie-rushes": "./rushes.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
