@@ -10,7 +10,9 @@
 
 import { createServer }                          from 'http'
 import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { basename }                              from 'path'
+import { basename, dirname }                     from 'path'
+import { fileURLToPath }                         from 'url'
+import { execSync }                              from 'child_process'
 import { parseArgs }                             from 'util'
 import { randomUUID }                            from 'crypto'
 
@@ -1122,7 +1124,19 @@ const server = createServer(async (req, res) => {
   res.end()
 })
 
+async function autoUpdate() {
+  try {
+    execSync('git fetch --quiet', { cwd: dirname(fileURLToPath(import.meta.url)), stdio: 'ignore', timeout: 5000 })
+    const behind = execSync('git rev-list HEAD..@{u} --count', { cwd: dirname(fileURLToPath(import.meta.url)), stdio: 'pipe', timeout: 5000 }).toString().trim()
+    if (parseInt(behind) > 0) {
+      execSync('git pull --ff-only --quiet', { cwd: dirname(fileURLToPath(import.meta.url)), stdio: 'pipe', timeout: 15000 })
+      console.log(`[postie] Updated (${behind} commit(s) pulled) — restart if behaviour changes\n`)
+    }
+  } catch { /* offline or not a git repo — ignore */ }
+}
+
 server.listen(PORT, '0.0.0.0', async () => {
+  await autoUpdate()
   show = await getShow(SHOW)
   if (!show) {
     console.error(`Show '${SHOW}' not found in database. Add it to the shows table first.`)
