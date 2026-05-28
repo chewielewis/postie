@@ -1,15 +1,18 @@
 /**
  * Core ingest operations:
- *   scanCard   — discover files + ffprobe metadata + extract previews
- *   ingestCard — backup originals, transcode to staging, verify + move to AvidMediaFiles
+ *   scanCard            — discover files + ffprobe metadata + extract previews
+ *   backupCard          — copy originals to backup drive (skips if already there)
+ *   transcodeCard       — DNxHR LB to per-session staging folder
+ *   transcodeRelayGroup — same for spanned (relay) clips
+ *   commitSessionToAvid — move completed staging folder → AvidMediaFiles
  */
 
-import { execSync, spawn }                                    from 'child_process'
+import { execSync, spawn }                from 'child_process'
 import { existsSync, mkdirSync, readdirSync, statSync,
-         copyFileSync, renameSync, writeFileSync, readFileSync } from 'fs'
-import { basename, extname, join, resolve, dirname }         from 'path'
-import { fileURLToPath }                                      from 'url'
-import { tcEnd }                                             from './tc.mjs'
+         copyFileSync, renameSync, writeFileSync, readFileSync, rmSync } from 'fs'
+import { basename, extname, join, resolve, dirname } from 'path'
+import { fileURLToPath }                  from 'url'
+import { tcEnd }                          from './tc.mjs'
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url))
 
@@ -76,8 +79,8 @@ export function probe(filePath) {
 }
 
 function toTimecode(seconds, fps) {
-  const f      = Math.round(fps)
-  const total  = Math.round(parseFloat(seconds) * f)
+  const f     = Math.round(fps)
+  const total = Math.round(parseFloat(seconds) * f)
   return [
     Math.floor(total / f / 3600),
     Math.floor(total / f / 60) % 60,
@@ -88,7 +91,6 @@ function toTimecode(seconds, fps) {
 
 /**
  * Scan a card: discover files, probe metadata, extract previews.
- * Returns an array of clip objects (no slug assigned yet).
  */
 export async function scanCard({ inputPath, cam, cardNum, date, slug, output, log, lut, fps = '25' }, emit) {
   const CAM     = cam.toUpperCase()
@@ -127,29 +129,29 @@ export async function scanCard({ inputPath, cam, cardNum, date, slug, output, lo
     const clipName     = `${date}_${SLUG_PART}_CAM${CAM}_CARD${CARDSTR}_${originalName}`
 
     const clip = {
-      name:        clipName,
-      tape:        clipName,
+      name:         clipName,
+      tape:         clipName,
       originalName,
-      filePath:    file,
-      slug:        slug ?? null,
-      start:       startTC,
-      end:         endTC,
-      duration:    durTC,
+      filePath:     file,
+      slug:         slug ?? null,
+      start:        startTC,
+      end:          endTC,
+      duration:     durTC,
       durationSec,
-      fps:         clipFps.toFixed(3),
-      width:       vs?.width  ?? 0,
-      height:      vs?.height ?? 0,
-      codec:       vs?.codec_name?.toUpperCase() ?? 'UNKNOWN',
+      fps:          clipFps.toFixed(3),
+      width:        vs?.width  ?? 0,
+      height:       vs?.height ?? 0,
+      codec:        vs?.codec_name?.toUpperCase() ?? 'UNKNOWN',
       previewPath:  null,
       proxyPath:    null,
       backupPath:   null,
       creationTime,
     }
 
-    // Extract preview frame (10% through, capped at 30s)
-    const seekSec   = Math.min(durationSec * 0.1, 30).toFixed(2)
+    // Extract preview frame (10% through, capped at 30 s)
+    const seekSec    = Math.min(durationSec * 0.1, 30).toFixed(2)
     const previewOut = join(previewDir, `${clipName}.jpg`)
-    const vfParts   = []
+    const vfParts    = []
     if (LUT) vfParts.push(`lut3d=${LUT.replace(/\\/g, '/')}`)
     vfParts.push('scale=640:-1')
 
@@ -174,9 +176,16 @@ export async function scanCard({ inputPath, cam, cardNum, date, slug, output, lo
 // Backup — copy originals to backup drive
 // ---------------------------------------------------------------------------
 
+/**
+ * Copy src → dest.
+ * Returns false (skipped) if dest already exists with the same byte size.
+ * Returns true if the file was actually copied.
+ */
 function copyFile(src, dest) {
   mkdirSync(dirname(dest), { recursive: true })
+  if (existsSync(dest) && statSync(dest).size === statSync(src).size) return false
   copyFileSync(src, dest)
+  return true
 }
 
 export async function backupCard({ card, date, backupRoot }, emit) {
@@ -184,51 +193,52 @@ export async function backupCard({ card, date, backupRoot }, emit) {
   emit({ type: 'log', data: `Backing up CAM${card.cam} CARD${String(card.cardNum).padStart(3,'0')}…` })
 
   for (const clip of card.clips) {
-    const rel  = basename(clip.filePath)
-    const dest = join(backupRoot, date, `CAM_${card.cam}`, `CARD_${String(card.cardNum).padStart(3,'0')}`, rel)
-    emit({ type: 'log', data: `  → ${rel}` })
-    copyFile(clip.filePath, dest)
+    const rel    = basename(clip.filePath)
+    const dest   = join(backupRoot, date, `CAM_${card.cam}`, `CARD_${String(card.cardNum).padStart(3,'0')}`, rel)
+    const copied = copyFile(clip.filePath, dest)
+    emit({ type: 'log', data: copied ? `  → ${rel}` : `  ↷ ${rel} (already on backup — skipped)` })
     clip.backupPath = dest
     emit({ type: 'backup', clip: clip.name })
   }
 }
 
 // ---------------------------------------------------------------------------
-// Transcode — DNxHR LB to staging folder, then move to AvidMediaFiles
+// Transcode — DNxHR LB proxy
+//
+// All clips (all cameras, all cards) in a session land in one flat staging dir:
+//   <output>/_staging/<date>/
+//
+// Nothing moves to AvidMediaFiles until commitSessionToAvid() is called at the
+// end of the session.  This prevents Avid from indexing partially-written media.
 // ---------------------------------------------------------------------------
 
 /**
- * Transcode a relay group (N spanned clips) into one DNxHR LB MXF via filter_complex concat.
- * parts[] must be sorted by relay_part ascending. Output is named after parts[0].
+ * Transcode a relay group (N spanned clips) into one DNxHR LB MXF.
+ * parts[] must be sorted by relay_part ascending. Output named after parts[0].
  */
-export async function transcodeRelayGroup({ parts, date, output, avid, log, lut, fps = '25', dryRun = false }, emit) {
-  const LUT      = resolveLut(log, lut)
-  const part1    = parts[0]
-  const SLUG_PART = (part1.slug ?? 'UNASSIGNED').toUpperCase().replace(/[^A-Z0-9]/g, '_')
-  const CARDSTR   = String(part1.cardNum ?? part1.card_num ?? 1).padStart(3, '0')
+export async function transcodeRelayGroup({ parts, date, output, log, lut, fps = '25', dryRun = false }, emit) {
+  const LUT    = resolveLut(log, lut)
+  const part1  = parts[0]
 
-  const stagingDir = join(output, '_staging', `${date}_${SLUG_PART}_CAM${part1.cam}_CARD${CARDSTR}`)
+  const stagingDir = join(output, '_staging', date)
   mkdirSync(stagingDir, { recursive: true })
-
   const stagedFile = join(stagingDir, `${part1.name}.mxf`)
 
   if (!dryRun) {
     if (!existsSync(stagedFile)) {
-      emit({ type: 'log', data: `  [${part1.name}] relay transcode (${parts.length} parts)…` })
+      emit({ type: 'log',       data: `  [${part1.name}] relay transcode (${parts.length} parts)…` })
       emit({ type: 'transcode', clip: part1.name, status: 'started' })
 
-      // Resolve file paths — prefer backup_path if original is offline
       const filePaths = parts.map(p => {
         const primary  = p.file_path  ?? p.filePath
         const fallback = p.backup_path ?? p.backupPath
-        if (primary && existsSync(primary))  return primary
+        if (primary  && existsSync(primary))  return primary
         if (fallback && existsSync(fallback)) return fallback
         throw new Error(`File not accessible for relay part ${p.relay_part}: ${primary}`)
       })
 
       await new Promise((res, rej) => {
-        // Build -filter_complex concat for N video + 2 audio streams
-        const n = filePaths.length
+        const n         = filePaths.length
         const filterIn  = filePaths.map((_, i) => `[${i}:v][${i}:a]`).join('')
         const filterStr = `${filterIn}concat=n=${n}:v=1:a=1[v][a]`
         const inputs    = filePaths.flatMap(f => ['-i', f])
@@ -246,7 +256,9 @@ export async function transcodeRelayGroup({ parts, date, output, avid, log, lut,
 
         let stderr = ''
         ff.stderr.on('data', d => { stderr += d.toString() })
-        ff.on('close', code => code === 0 ? res() : rej(new Error(`FFmpeg relay concat failed:\n${stderr.slice(-400)}`)))
+        ff.on('close', code =>
+          code === 0 ? res() : rej(new Error(`FFmpeg relay concat failed:\n${stderr.slice(-400)}`))
+        )
       })
     } else {
       emit({ type: 'log', data: `  [${part1.name}] relay already in staging, skipping` })
@@ -256,31 +268,18 @@ export async function transcodeRelayGroup({ parts, date, output, avid, log, lut,
       throw new Error(`Staged relay file missing or empty: ${stagedFile}`)
     }
 
-    if (avid) {
-      mkdirSync(avid, { recursive: true })
-      const avidDest = join(avid, `${part1.name}.mxf`)
-      renameSync(stagedFile, avidDest)
-      emit({ type: 'log',       data: `  [${part1.name}] relay proxy moved to AvidMediaFiles` })
-      emit({ type: 'transcode', clip: part1.name, status: 'done', proxyPath: avidDest })
-    } else {
-      emit({ type: 'transcode', clip: part1.name, status: 'done', proxyPath: stagedFile })
-    }
+    emit({ type: 'transcode', clip: part1.name, status: 'done', proxyPath: stagedFile })
   } else {
     emit({ type: 'transcode', clip: part1.name, status: 'dry-run (relay)' })
   }
 }
 
-export async function transcodeCard({ card, date, output, avid, log, lut, fps = '25', dryRun = false }, emit) {
+export async function transcodeCard({ card, date, output, log, lut, fps = '25', dryRun = false }, emit) {
   const LUT = resolveLut(log, lut)
 
   for (const clip of card.clips) {
-    const SLUG_PART = (clip.slug ?? 'UNASSIGNED').toUpperCase().replace(/[^A-Z0-9]/g, '_')
-    const CARDSTR   = String(card.cardNum).padStart(3, '0')
-
-    // Staging path — transcode here first
-    const stagingDir = join(output, '_staging', `${date}_${SLUG_PART}_CAM${card.cam}_CARD${CARDSTR}`)
+    const stagingDir = join(output, '_staging', date)
     mkdirSync(stagingDir, { recursive: true })
-
     const stagedFile = join(stagingDir, `${clip.name}.mxf`)
 
     if (!dryRun) {
@@ -306,25 +305,53 @@ export async function transcodeCard({ card, date, output, avid, log, lut, fps = 
         emit({ type: 'log', data: `  [${clip.name}] already in staging, skipping` })
       }
 
-      // Verify: staged file must exist and be non-zero
       if (!existsSync(stagedFile) || statSync(stagedFile).size === 0) {
         throw new Error(`Staged file missing or empty: ${stagedFile}`)
       }
 
-      // Move to AvidMediaFiles
-      if (avid) {
-        mkdirSync(avid, { recursive: true })
-        const avidDest = join(avid, `${clip.name}.mxf`)
-        renameSync(stagedFile, avidDest)
-        clip.proxyPath = avidDest
-        emit({ type: 'log',       data: `  [${clip.name}] moved to AvidMediaFiles` })
-        emit({ type: 'transcode', clip: clip.name, status: 'done', proxyPath: avidDest })
-      } else {
-        clip.proxyPath = stagedFile
-        emit({ type: 'transcode', clip: clip.name, status: 'done', proxyPath: stagedFile })
-      }
+      clip.proxyPath = stagedFile
+      emit({ type: 'transcode', clip: clip.name, status: 'done', proxyPath: stagedFile })
     } else {
       emit({ type: 'transcode', clip: clip.name, status: 'dry-run' })
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Commit — move the entire session staging folder into AvidMediaFiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Move <output>/_staging/<date> → <avidRoot>/<sessionFolder> atomically.
+ *
+ * Uses rename() when on the same volume (fast, instant).
+ * Falls back to copy-then-delete when crossing volumes (EXDEV error).
+ *
+ * Only call this once ALL cards in the session have been transcoded so that
+ * Avid never sees a partially-populated folder.
+ */
+export function commitSessionToAvid({ stagingDir, avidRoot, sessionFolder }, emit) {
+  if (!avidRoot) return
+  if (!existsSync(stagingDir)) {
+    emit({ type: 'log', data: 'No staged files found — skipping Avid commit' })
+    return
+  }
+
+  const dest = join(avidRoot, sessionFolder)
+  mkdirSync(avidRoot, { recursive: true })
+  emit({ type: 'log', data: `Moving session folder to Avid: ${dest}` })
+
+  try {
+    renameSync(stagingDir, dest)
+  } catch (e) {
+    if (e.code !== 'EXDEV') throw e
+    // Cross-volume move: copy each file then remove staging dir
+    mkdirSync(dest, { recursive: true })
+    for (const f of readdirSync(stagingDir)) {
+      copyFileSync(join(stagingDir, f), join(dest, f))
+    }
+    rmSync(stagingDir, { recursive: true, force: true })
+  }
+
+  emit({ type: 'log', data: `Avid session folder ready: ${dest}` })
 }

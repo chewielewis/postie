@@ -25,7 +25,7 @@ function loadEnv() {
     readFileSync(envPath, 'utf8')
       .split('\n')
       .filter(l => l.includes('=') && !l.startsWith('#'))
-      .map(l => l.split('=').map(s => s.trim()))
+      .map(l => { const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()] })
   )
 }
 

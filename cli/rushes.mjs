@@ -2,17 +2,14 @@
 /**
  * postie-rushes  —  camera card ingest tool
  *
- * Usage:  node rushes.mjs --ui --show <CODE> [--port 4321]
- *         node rushes.mjs --help
- *
- * Requirements: Node.js 18+, ffmpeg (brew install ffmpeg)
+ * Usage:  node rushes.mjs --show <CODE> [--port 4321]
  */
 
 import { createServer }                          from 'http'
-import { existsSync, readFileSync, writeFileSync } from 'fs'
-import { basename, dirname }                     from 'path'
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { basename, dirname, join }               from 'path'
 import { fileURLToPath }                         from 'url'
-import { execSync }                              from 'child_process'
+import { execSync, spawnSync }                   from 'child_process'
 import { parseArgs }                             from 'util'
 import { randomUUID }                            from 'crypto'
 
@@ -22,9 +19,8 @@ import { getShow, getSlugs, addSlug,
          addClip, clipsBySlug }                  from './lib/db.mjs'
 import { detectRelays }                          from './lib/relay.mjs'
 import { buildALE, buildFCPXML }                 from './lib/formats.mjs'
-import { scanCard, backupCard, transcodeCard, transcodeRelayGroup } from './lib/ingest.mjs'
-import { join, resolve }                         from 'path'
-import { mkdirSync }                             from 'fs'
+import { scanCard, backupCard, transcodeCard,
+         transcodeRelayGroup, commitSessionToAvid } from './lib/ingest.mjs'
 
 // ---------------------------------------------------------------------------
 // Args
@@ -32,16 +28,15 @@ import { mkdirSync }                             from 'fs'
 
 const { values: args } = parseArgs({
   options: {
-    ui:    { type: 'boolean', default: true },
-    show:  { type: 'string' },
-    port:  { type: 'string',  default: '4321' },
-    help:  { type: 'boolean', default: false },
+    show: { type: 'string' },
+    port: { type: 'string', default: '4321' },
+    help: { type: 'boolean', default: false },
   },
   strict: false,
 })
 
 if (args.help) {
-  console.log('Usage: node rushes.mjs --show <CODE> [--port 4321]\nOpen http://localhost:<port> in a browser.')
+  console.log('Usage: node rushes.mjs --show <CODE> [--port 4321]')
   process.exit(0)
 }
 
@@ -53,14 +48,14 @@ if (!args.show) {
 const SHOW = args.show.toUpperCase()
 const PORT = parseInt(args.port)
 
-let show = null  // loaded on server start
+let show = null
 
 // ---------------------------------------------------------------------------
-// In-memory job state (SSE clients + scan results awaiting confirmation)
+// In-memory job state
 // ---------------------------------------------------------------------------
 
-const jobs    = new Map()  // jobId → { events[], clients[] }
-const scans   = new Map()  // scanId → { clips[], card metadata }
+const jobs = new Map()   // jobId → { events[], clients[] }
+const scans = new Map()  // scanId → { jobId, clips[], params }
 
 function createJob() {
   const id = randomUUID()
@@ -88,192 +83,192 @@ const HTML = /* html */`<!DOCTYPE html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Postie Rushes — ${SHOW}</title>
 <style>
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0 }
-:root {
-  --bg:#0a0a0a; --s1:#111; --s2:#181818; --s3:#222;
-  --b:#2a2a2a; --t:#e8e8e8; --m:#777; --m2:#555;
-  --accent:#E63946; --green:#4ade80; --blue:#60a5fa;
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d0d0d;--s1:#141414;--s2:#1a1a1a;--s3:#222;
+  --b:#2c2c2c;--t:#e0e0e0;--m:#777;--m2:#444;
+  --accent:#E63946;--green:#4ade80;--blue:#60a5fa;--yellow:#facc15;
+  --r:8px;
 }
-body { background:var(--bg); color:var(--t); font-family:system-ui,sans-serif; font-size:14px }
-a { color:inherit; text-decoration:none }
+body{background:var(--bg);color:var(--t);font-family:system-ui,-apple-system,sans-serif;font-size:13px;line-height:1.5}
 
 /* Layout */
-.app { display:grid; grid-template-columns:280px 1fr; min-height:100vh }
-.sidebar { background:var(--s1); border-right:1px solid var(--b); padding:24px 20px; display:flex; flex-direction:column; gap:24px }
-.main { padding:32px 28px; overflow-y:auto }
+.page{max-width:940px;margin:0 auto;padding:0 18px 80px}
 
-/* Sidebar */
-.logo { font-size:13px; font-weight:700; letter-spacing:.1em; color:var(--accent) }
-.show-badge { display:inline-block; font-size:10px; font-weight:600; padding:2px 7px; border-radius:4px; background:var(--accent)22; color:var(--accent); margin-top:4px }
-.sidebar-section { display:flex; flex-direction:column; gap:8px }
-.sidebar-label { font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--m2); margin-bottom:2px }
-.slug-list { display:flex; flex-direction:column; gap:4px }
-.slug-item {
-  display:flex; align-items:center; justify-content:space-between;
-  font-size:12px; padding:6px 10px; border-radius:6px;
-  background:var(--s2); border:1px solid var(--b); cursor:pointer; transition:border-color .15s;
+/* Header */
+.hdr{display:flex;align-items:center;gap:10px;padding:14px 0 12px;border-bottom:1px solid var(--b);margin-bottom:20px}
+.hdr-logo{font-size:11px;font-weight:700;letter-spacing:.12em;color:var(--accent)}
+.hdr-show{font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:var(--accent)22;color:var(--accent)}
+.hdr-session{margin-left:auto;font-size:11px;color:var(--m)}
+
+/* Cards (sections) */
+.card{border:1px solid var(--b);border-radius:var(--r);margin-bottom:14px;overflow:hidden}
+.card-head{
+  display:flex;align-items:center;gap:10px;
+  padding:11px 16px;background:var(--s1);
+  cursor:pointer;user-select:none;
 }
-.slug-item:hover { border-color:#444 }
-.slug-item.selected { border-color:var(--accent); background:var(--accent)11 }
-.slug-dot { width:6px; height:6px; border-radius:50%; background:var(--m) }
-.slug-add { display:flex; gap:6px; margin-top:4px }
-.slug-add input { flex:1; background:var(--s2); border:1px solid var(--b); color:var(--t); border-radius:6px; padding:7px 10px; font-size:12px; outline:none }
-.slug-add button { background:var(--s3); border:1px solid var(--b); color:var(--t); border-radius:6px; padding:7px 12px; font-size:12px; cursor:pointer }
-
-/* Main panels */
-.panel { display:none }
-.panel.active { display:block }
-.panel-title { font-size:17px; font-weight:600; margin-bottom:6px }
-.panel-sub   { font-size:12px; color:var(--m); margin-bottom:28px }
+.card-head:hover{background:var(--s2)}
+.card-num{font-size:10px;font-weight:700;color:var(--accent);min-width:16px}
+.card-title{font-size:12px;font-weight:600;letter-spacing:.05em;text-transform:uppercase}
+.card-summary{margin-left:auto;font-size:11px;color:var(--m)}
+.card-chevron{font-size:9px;color:var(--m2);margin-left:6px;transition:transform .18s}
+.card-head.closed .card-chevron{transform:rotate(-90deg)}
+.card-body{padding:16px;border-top:1px solid var(--b)}
+.card-body.hidden{display:none}
 
 /* Forms */
-.form { display:flex; flex-direction:column; gap:14px; max-width:560px }
-.row  { display:grid; grid-template-columns:1fr 1fr; gap:12px }
-.field { display:flex; flex-direction:column; gap:5px }
-.field label { font-size:11px; color:var(--m); text-transform:uppercase; letter-spacing:.05em }
-input, select {
-  background:var(--s1); border:1px solid var(--b); color:var(--t);
-  border-radius:8px; padding:9px 13px; font-size:13px; outline:none; width:100%;
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.span2{grid-column:span 2}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--m)}
+.hint{font-size:10px;color:var(--m2)}
+input,select{
+  background:var(--bg);border:1px solid var(--b);color:var(--t);
+  border-radius:6px;padding:8px 10px;font-size:12px;outline:none;width:100%;
 }
-input:focus, select:focus { border-color:#444 }
-input::placeholder { color:var(--m2) }
-.hint { font-size:11px; color:var(--m2); margin-top:2px }
-.divider { height:1px; background:var(--b); margin:4px 0 }
+input:focus,select:focus{border-color:#3a3a3a}
+input::placeholder{color:var(--m2)}
+
+/* Path row with browse */
+.path-row{display:flex;gap:6px}
+.path-row input{flex:1}
+.path-drop-active{border-color:var(--accent)!important;background:var(--accent)0a!important}
 
 /* Buttons */
-.btn {
-  display:inline-flex; align-items:center; gap:8px;
-  background:var(--s2); border:1px solid var(--b); color:var(--t);
-  border-radius:8px; padding:10px 18px; font-size:13px; font-weight:500;
-  cursor:pointer; transition:background .15s; white-space:nowrap;
+.btn{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--s2);border:1px solid var(--b);color:var(--t);
+  border-radius:6px;padding:8px 14px;font-size:12px;font-weight:500;
+  cursor:pointer;white-space:nowrap;transition:background .12s;
 }
-.btn:hover { background:var(--s3) }
-.btn:disabled { opacity:.35; cursor:default }
-.btn.primary { background:var(--accent)22; border-color:var(--accent)44; color:var(--accent) }
-.btn.primary:hover { background:var(--accent)33 }
-.btn-row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:4px }
+.btn:hover{background:var(--s3)}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.primary{background:var(--accent)20;border-color:var(--accent)55;color:var(--accent)}
+.btn.primary:hover{background:var(--accent)30}
+.btn.sm{padding:5px 10px;font-size:11px}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:14px}
 
-/* Card scan area */
-.scan-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:20px }
-.cam-selector { display:flex; gap:6px }
-.cam-btn {
-  width:36px; height:36px; border-radius:8px; border:1px solid var(--b);
-  background:var(--s2); color:var(--m); font-size:13px; font-weight:600;
-  cursor:pointer; display:flex; align-items:center; justify-content:center;
-  transition:all .15s;
+/* Camera selector */
+.cam-row{display:flex;gap:5px}
+.cam-btn{
+  width:32px;height:32px;border-radius:6px;
+  border:1px solid var(--b);background:var(--s2);color:var(--m);
+  font-size:12px;font-weight:600;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;
 }
-.cam-btn:hover  { border-color:#444; color:var(--t) }
-.cam-btn.active { border-color:var(--accent); background:var(--accent)22; color:var(--accent) }
+.cam-btn:hover{border-color:#3a3a3a;color:var(--t)}
+.cam-btn.active{border-color:var(--accent);background:var(--accent)20;color:var(--accent)}
+
+/* Story chips */
+.chips{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:10px}
+.chip{
+  font-size:11px;font-weight:600;padding:3px 10px;border-radius:20px;
+  background:var(--s2);border:1px solid var(--b);cursor:default;
+}
 
 /* Thumb grid */
-.thumb-grid {
-  display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px;
-  margin:20px 0;
+.thumbs{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:9px;margin-top:14px}
+.thumb{background:var(--s1);border:1px solid var(--b);border-radius:var(--r);overflow:hidden}
+.thumb-img{position:relative;aspect-ratio:16/9;background:#000;cursor:zoom-in}
+.thumb-img img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb-ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--m2);font-size:10px}
+.thumb-badge{
+  position:absolute;top:5px;right:5px;
+  font-size:9px;font-weight:600;padding:2px 5px;border-radius:3px;
+  background:rgba(0,0,0,.8);color:var(--m);
 }
-.thumb-card {
-  background:var(--s1); border:1px solid var(--b); border-radius:8px; overflow:hidden;
-}
-.thumb-img { position:relative; aspect-ratio:16/9; background:#000; cursor:zoom-in }
-.thumb-img img  { width:100%; height:100%; object-fit:cover; display:block }
-.thumb-ph { width:100%; height:100%; display:flex; align-items:center; justify-content:center; color:var(--m2); font-size:11px }
-.thumb-badge {
-  position:absolute; top:6px; right:6px;
-  font-size:9px; font-weight:600; padding:2px 6px; border-radius:4px;
-  background:rgba(0,0,0,.75); color:#aaa;
-}
-.thumb-badge.done    { color:var(--green) }
-.thumb-badge.active  { color:var(--accent) }
-.thumb-badge.backup  { color:var(--blue) }
-.thumb-footer { padding:8px 10px 10px }
-.thumb-name { font-family:monospace; font-size:10px; color:var(--t); white-space:nowrap; overflow:hidden; text-overflow:ellipsis }
-.thumb-slug-sel {
-  margin-top:5px; width:100%; background:var(--s2); border:1px solid var(--b);
-  color:var(--m); border-radius:5px; padding:4px 7px; font-size:11px; outline:none;
-}
-.thumb-slug-sel:focus { border-color:#444 }
-
-/* Lightbox */
-.lb { display:none; position:fixed; inset:0; background:rgba(0,0,0,.92); z-index:200; align-items:center; justify-content:center; cursor:zoom-out }
-.lb.open { display:flex }
-.lb img { max-width:90vw; max-height:90vh; border-radius:4px }
-.lb-lbl { position:fixed; bottom:20px; left:50%; transform:translateX(-50%); font-family:monospace; font-size:11px; color:#aaa; background:rgba(0,0,0,.7); padding:5px 12px; border-radius:6px }
-
-/* Progress log */
-.log { background:var(--s1); border:1px solid var(--b); border-radius:8px; padding:12px 14px; font-family:monospace; font-size:11px; color:var(--m); max-height:160px; overflow-y:auto; line-height:1.7; margin:16px 0 }
-
-/* Story ALE table */
-.story-table { width:100%; border-collapse:collapse; margin-top:16px; font-size:12px }
-.story-table th { text-align:left; padding:8px 12px; color:var(--m); font-weight:500; border-bottom:1px solid var(--b) }
-.story-table td { padding:8px 12px; border-bottom:1px solid var(--b)55 }
-.cam-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px }
-.downloads { display:flex; gap:8px; flex-wrap:wrap; margin-top:20px }
-.dl-btn {
-  display:inline-flex; align-items:center; gap:8px;
-  background:var(--s1); border:1px solid var(--b);
-  border-radius:8px; padding:9px 14px; font-size:12px; color:var(--t); cursor:pointer;
-  transition:background .15s;
-}
-.dl-btn:hover { background:var(--s2) }
-.dl-btn a { color:inherit; text-decoration:none }
+.thumb-badge.xcode{color:var(--yellow)}
+.thumb-badge.done{color:var(--green)}
+.thumb-foot{padding:7px 8px 8px}
+.thumb-name{font-family:monospace;font-size:9px;color:var(--m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:4px}
+.thumb-foot select{background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:4px;padding:3px 6px;font-size:11px;width:100%}
 
 /* Queue */
-.queue-list { display:flex; flex-direction:column; gap:8px; margin:16px 0 }
-.queue-item {
-  display:flex; align-items:center; justify-content:space-between;
-  background:var(--s1); border:1px solid var(--b); border-radius:8px; padding:10px 14px;
+.q-list{display:flex;flex-direction:column;gap:7px}
+.q-item{display:flex;align-items:center;gap:12px;background:var(--s2);border:1px solid var(--b);border-radius:6px;padding:9px 13px}
+.q-info{flex:1}
+.q-title{font-size:12px;font-weight:500}
+.q-meta{font-size:10px;color:var(--m);margin-top:1px}
+.q-chip{font-size:10px;font-weight:600;padding:2px 8px;border-radius:4px;background:var(--s1);border:1px solid var(--b);color:var(--m)}
+.q-chip.backing{color:var(--blue);background:#60a5fa12;border-color:#60a5fa30}
+.q-chip.running{color:var(--yellow);background:#facc1512;border-color:#facc1530}
+.q-chip.done{color:var(--green);background:#4ade8012;border-color:#4ade8030}
+.q-chip.err{color:var(--accent);background:var(--accent)12;border-color:var(--accent)30}
+.q-empty{color:var(--m2);font-size:12px;text-align:center;padding:20px 0}
+
+/* Progress */
+.prog-status{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.prog-op{font-size:12px;font-weight:500}
+.prog-frac{font-size:11px;color:var(--m)}
+.prog-bar-wrap{height:3px;background:var(--b);border-radius:2px;overflow:hidden;margin-bottom:14px}
+.prog-bar{height:100%;background:var(--accent);border-radius:2px;transition:width .4s ease;width:0%}
+
+/* Log */
+.log{
+  background:var(--bg);border:1px solid var(--b);border-radius:6px;
+  padding:10px 12px;font-family:'Consolas','Courier New',monospace;font-size:11px;
+  line-height:1.85;max-height:420px;overflow-y:auto;
 }
-.queue-item-info { display:flex; flex-direction:column; gap:3px }
-.queue-item-title { font-size:13px; font-weight:500 }
-.queue-item-meta  { font-size:11px; color:var(--m) }
-.queue-status { font-size:11px; padding:3px 8px; border-radius:4px; background:var(--s2); color:var(--m) }
-.queue-status.done { background:var(--green)15; color:var(--green) }
-.queue-status.active { background:var(--accent)15; color:var(--accent) }
+.log-line{display:flex;gap:10px}
+.log-ts{color:var(--m2);flex-shrink:0;width:38px;font-size:10px;padding-top:1px}
+.log-txt{word-break:break-all}
+.log-txt.info{color:var(--m)}
+.log-txt.backup{color:var(--blue)}
+.log-txt.xcode{color:var(--yellow)}
+.log-txt.ok{color:var(--green)}
+.log-txt.err{color:var(--accent)}
+
+/* Downloads */
+.ale-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.ale-btn{
+  display:inline-flex;align-items:center;gap:6px;
+  background:var(--s2);border:1px solid var(--b);
+  border-radius:6px;padding:7px 12px;font-size:11px;color:var(--t);text-decoration:none;
+}
+.ale-btn:hover{background:var(--s3)}
+
+/* Lightbox */
+.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:100;align-items:center;justify-content:center;cursor:zoom-out}
+.lb.open{display:flex}
+.lb img{max-width:90vw;max-height:90vh;border-radius:4px}
+.lb-lbl{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:10px;color:#aaa;background:rgba(0,0,0,.7);padding:4px 10px;border-radius:4px}
 </style>
 </head>
 <body>
-<div class="app">
+<div class="page">
 
-  <!-- Sidebar -->
-  <aside class="sidebar">
-    <div>
-      <div class="logo">POSTIE RUSHES</div>
-      <div class="show-badge">${SHOW}</div>
+  <!-- Header -->
+  <div class="hdr">
+    <span class="hdr-logo">POSTIE RUSHES</span>
+    <span class="hdr-show">${SHOW}</span>
+    <span class="hdr-session" id="hdrSession">No session</span>
+  </div>
+
+  <!-- 1 · Session -->
+  <div class="card" id="c-session">
+    <div class="card-head" onclick="toggleCard('session')">
+      <span class="card-num">1</span>
+      <span class="card-title">Session</span>
+      <span class="card-summary" id="cs-session"></span>
+      <span class="card-chevron">▼</span>
     </div>
-
-    <div class="sidebar-section">
-      <div class="sidebar-label">Session</div>
-      <div id="sessionInfo" style="font-size:12px;color:var(--m)">No session</div>
-      <button class="btn" style="font-size:12px;padding:7px 12px" onclick="showPanel('session')">
-        New / switch session
-      </button>
-    </div>
-
-    <div class="sidebar-section">
-      <div class="sidebar-label">Stories this season</div>
-      <div class="slug-list" id="slugList"></div>
-      <div class="slug-add">
-        <input id="newSlugInput" placeholder="New story slug…" maxlength="20"
-          onkeydown="if(event.key==='Enter')addSlug()">
-        <button onclick="addSlug()">+</button>
-      </div>
-    </div>
-
-    <div style="flex:1"></div>
-    <div style="font-size:10px;color:var(--m2)">localhost:${PORT}</div>
-  </aside>
-
-  <!-- Main -->
-  <main class="main">
-
-    <!-- Panel: session setup -->
-    <div id="panel-session" class="panel active">
-      <div class="panel-title">Session setup</div>
-      <div class="panel-sub">Configure a shoot day. Settings persist for the session.</div>
-      <form class="form" id="sessionForm">
-        <div class="row">
+    <div class="card-body" id="cb-session">
+      <form id="sessionForm">
+        <div class="grid">
           <div class="field">
-            <label>Shoot date (MMDD)</label>
-            <input name="date" id="dateInput" maxlength="4" placeholder="0524" required>
+            <label>Shoot date <small style="font-weight:400;text-transform:none">(MMDD)</small></label>
+            <input name="date" id="dateInput" maxlength="4" placeholder="0528" required>
+          </div>
+          <div class="field">
+            <label>Frame rate</label>
+            <select name="fps">
+              <option value="25" selected>25 fps</option>
+              <option value="29.97">29.97 fps</option>
+              <option value="50">50 fps</option>
+              <option value="23.976">23.976 fps</option>
+              <option value="24">24 fps</option>
+            </select>
           </div>
           <div class="field">
             <label>Log format</label>
@@ -284,95 +279,137 @@ input::placeholder { color:var(--m2) }
               <option value="none">None — already Rec.709</option>
             </select>
           </div>
-        </div>
-        <div class="field">
-          <label>Output root</label>
-          <input name="output" placeholder="/Volumes/AvidServer/Ingest" required>
-        </div>
-        <div class="field">
-          <label>Backup drive</label>
-          <input name="backup" placeholder="/Volumes/SHOW_BACKUP">
-          <span class="hint">Camera originals are copied here before transcoding</span>
-        </div>
-        <div class="field">
-          <label>AvidMediaFiles path</label>
-          <input name="avid" placeholder="/Volumes/AvidServer/AvidMediaFiles/MXF/1">
-          <span class="hint">Proxies move here automatically once verified</span>
-        </div>
-        <div class="row">
+          <div class="field"><!-- spacer --></div>
+          <div class="field span2">
+            <label>Output root</label>
+            <div class="path-row" id="outputWrap">
+              <input name="output" id="outputPath" placeholder="D:\\Ingest">
+              <button type="button" class="btn" id="browseOutputBtn" onclick="browsePath('outputPath','browseOutputBtn')">Browse…</button>
+            </div>
+          </div>
           <div class="field">
-            <label>Frame rate</label>
-            <select name="fps">
-              <option value="25" selected>25</option>
-              <option value="29.97">29.97</option>
-              <option value="50">50</option>
-              <option value="23.976">23.976</option>
-              <option value="24">24</option>
-            </select>
+            <label>Backup drive</label>
+            <div class="path-row" id="backupWrap">
+              <input name="backup" id="backupPath" placeholder="E:\\SHOW_BACKUP">
+              <button type="button" class="btn" id="browseBackupBtn" onclick="browsePath('backupPath','browseBackupBtn')">Browse…</button>
+            </div>
+            <span class="hint">Originals copied here before transcode</span>
+          </div>
+          <div class="field">
+            <label>AvidMediaFiles path</label>
+            <div class="path-row" id="avidWrap">
+              <input name="avid" id="avidPath" placeholder="\\\\Server\\AvidMediaFiles\\MXF\\1">
+              <button type="button" class="btn" id="browseAvidBtn" onclick="browsePath('avidPath','browseAvidBtn')">Browse…</button>
+            </div>
+            <span class="hint">Session folder moves here once complete</span>
           </div>
         </div>
         <div class="btn-row">
-          <button type="submit" class="btn primary">Create session →</button>
+          <button type="submit" class="btn primary">Set session →</button>
         </div>
       </form>
     </div>
+  </div>
 
-    <!-- Panel: scan card -->
-    <div id="panel-scan" class="panel">
-      <div class="panel-title">Scan card</div>
-      <div class="panel-sub">Scan a camera card. Assign each clip to a story, then add to the ingest queue.</div>
+  <!-- 2 · Stories -->
+  <div class="card" id="c-stories">
+    <div class="card-head" onclick="toggleCard('stories')">
+      <span class="card-num">2</span>
+      <span class="card-title">Stories</span>
+      <span class="card-summary" id="cs-stories">0 stories</span>
+      <span class="card-chevron">▼</span>
+    </div>
+    <div class="card-body" id="cb-stories">
+      <div class="chips" id="storyChips"><span style="color:var(--m2);font-size:11px">No stories yet</span></div>
+      <div style="display:flex;gap:7px;align-items:center">
+        <input id="newSlugInput" placeholder="Story slug…" maxlength="20" style="width:160px"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();addSlug()}">
+        <button class="btn sm" onclick="addSlug()">+ Add</button>
+      </div>
+    </div>
+  </div>
 
-      <div class="form" style="max-width:560px;margin-bottom:24px">
-        <div class="row">
-          <div class="field">
-            <label>Card path</label>
-            <input id="cardPath" placeholder="/Volumes/CARD_001">
+  <!-- 3 · Scan card -->
+  <div class="card" id="c-scan">
+    <div class="card-head" onclick="toggleCard('scan')">
+      <span class="card-num">3</span>
+      <span class="card-title">Scan card</span>
+      <span class="card-summary" id="cs-scan"></span>
+      <span class="card-chevron">▼</span>
+    </div>
+    <div class="card-body" id="cb-scan">
+      <div class="grid">
+        <div class="field span2">
+          <label>Card path</label>
+          <div class="path-row" id="cardPathWrap">
+            <input id="cardPath" placeholder="Drop folder here, paste path, or click Browse…">
+            <button type="button" class="btn" id="browseCardBtn" onclick="browsePath('cardPath','browseCardBtn')">Browse…</button>
           </div>
-          <div class="field">
-            <label>Camera</label>
-            <div class="cam-selector" id="camSelector">
-              ${['A','B','C','D'].map(c => `<button type="button" class="cam-btn" data-cam="${c}" onclick="selectCam('${c}')">${c}</button>`).join('')}
-            </div>
+        </div>
+        <div class="field">
+          <label>Camera</label>
+          <div class="cam-row" id="camRow">
+            ${['A','B','C','D'].map(c =>
+              `<button type="button" class="cam-btn" data-cam="${c}" onclick="selCam('${c}')">${c}</button>`
+            ).join('')}
           </div>
         </div>
         <div class="field">
           <label>Default story</label>
           <select id="defaultSlug"></select>
         </div>
-        <div class="btn-row">
-          <button class="btn primary" id="scanBtn" onclick="startScan()">Scan card</button>
-          <span id="cardNumLabel" style="font-size:12px;color:var(--m)"></span>
-        </div>
       </div>
-
-      <div id="scanLog" class="log" style="display:none"></div>
-
-      <div id="thumbGrid" class="thumb-grid"></div>
-
+      <div class="btn-row">
+        <button class="btn primary" id="scanBtn" onclick="startScan()">Scan card</button>
+        <span id="cardNumLabel" style="font-size:11px;color:var(--m)"></span>
+      </div>
+      <div id="thumbGrid" class="thumbs"></div>
       <div id="addQueueRow" class="btn-row" style="display:none">
         <button class="btn primary" onclick="addToQueue()">Add to ingest queue →</button>
-        <button class="btn" onclick="clearScan()">Discard scan</button>
+        <button class="btn" onclick="clearScan()">Discard</button>
       </div>
     </div>
+  </div>
 
-    <!-- Panel: ingest queue -->
-    <div id="panel-ingest" class="panel">
-      <div class="panel-title">Ingest queue</div>
-      <div class="panel-sub">Review queued cards and start ingest. Backup → Transcode → Verify → Move to Avid.</div>
-
-      <div class="queue-list" id="queueList"></div>
-
-      <div class="btn-row" style="margin-top:8px">
-        <button class="btn primary" id="ingestBtn" onclick="startIngest()">Start ingest</button>
-        <button class="btn" onclick="showPanel('scan')">← Add more cards</button>
-      </div>
-
-      <div id="ingestLog" class="log" style="display:none"></div>
-
-      <div id="storyResults"></div>
+  <!-- 4 · Queue -->
+  <div class="card" id="c-queue">
+    <div class="card-head" onclick="toggleCard('queue')">
+      <span class="card-num">4</span>
+      <span class="card-title">Ingest queue</span>
+      <span class="card-summary" id="cs-queue">empty</span>
+      <span class="card-chevron">▼</span>
     </div>
+    <div class="card-body" id="cb-queue">
+      <div class="q-list" id="qList">
+        <div class="q-empty">Queue is empty — scan a card and add it above.</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="ingestBtn" onclick="startIngest()" disabled>Start ingest →</button>
+      </div>
+    </div>
+  </div>
 
-  </main>
+  <!-- 5 · Progress (always open) -->
+  <div class="card" id="c-progress">
+    <div class="card-head" onclick="toggleCard('progress')">
+      <span class="card-num">5</span>
+      <span class="card-title">Progress</span>
+      <span class="card-summary" id="cs-progress">idle</span>
+      <span class="card-chevron">▼</span>
+    </div>
+    <div class="card-body" id="cb-progress">
+      <div class="prog-status">
+        <span class="prog-op" id="progOp">—</span>
+        <span class="prog-frac" id="progFrac"></span>
+      </div>
+      <div class="prog-bar-wrap"><div class="prog-bar" id="progBar"></div></div>
+      <div class="log" id="mainLog">
+        <div class="log-line"><span class="log-txt info">Waiting for ingest to start…</span></div>
+      </div>
+      <div id="aleRow" class="ale-row" style="display:none"></div>
+    </div>
+  </div>
+
 </div>
 
 <!-- Lightbox -->
@@ -382,407 +419,418 @@ input::placeholder { color:var(--m2) }
 </div>
 
 <script>
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
-let db          = null   // full db snapshot
-let session     = null   // current session object
-let currentScan = null   // { scanId, clips, cam, cardPath }
-let selectedCam = 'A'
-const queue     = []     // array of { scanId, card metadata }
+// ── State ─────────────────────────────────────────────────────────────
+let db      = null
+let session = null
+let curScan = null   // { scanId, clips[], cam, cardNum, cardPath }
+let camSel  = 'A'
+const queue = []     // { scanId, cardId, cam, cardNum, cardPath, clips[] }
+let totalClips = 0
+let doneClips  = 0
+let opStart    = 0
 
-const CAM_COLORS = { A:'#67e8f9', B:'#60a5fa', C:'#4ade80', D:'#e879f9', E:'#facc15', F:'#f87171' }
-
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
+// ── Init ──────────────────────────────────────────────────────────────
 async function init() {
-  const res  = await fetch('/api/db')
-  db         = await res.json()
-  renderSlugs()
-
-  // Pre-fill today's date
+  const res = await fetch('/api/db')
+  db = await res.json()
+  renderStories()
   const n = new Date()
   document.getElementById('dateInput').value =
     String(n.getMonth()+1).padStart(2,'0') + String(n.getDate()).padStart(2,'0')
-
-  selectCam('A')
+  selCam('A')
 }
 
-// ---------------------------------------------------------------------------
-// Slugs
-// ---------------------------------------------------------------------------
-function renderSlugs() {
-  const list = document.getElementById('slugList')
-  list.innerHTML = ''
+// ── Section toggle ────────────────────────────────────────────────────
+function toggleCard(name) {
+  const head = document.querySelector('#c-' + name + ' .card-head')
+  const body = document.getElementById('cb-' + name)
+  const closing = !head.classList.contains('closed')
+  head.classList.toggle('closed', closing)
+  body.classList.toggle('hidden', closing)
+}
+function openCard(name) {
+  document.querySelector('#c-' + name + ' .card-head').classList.remove('closed')
+  document.getElementById('cb-' + name).classList.remove('hidden')
+}
+function closeCard(name) {
+  document.querySelector('#c-' + name + ' .card-head').classList.add('closed')
+  document.getElementById('cb-' + name).classList.add('hidden')
+}
+
+// ── Stories ───────────────────────────────────────────────────────────
+function renderStories() {
+  const chips = document.getElementById('storyChips')
+  chips.innerHTML = ''
   for (const s of (db?.slugs ?? [])) {
     const el = document.createElement('div')
-    el.className = 'slug-item'
-    el.dataset.slug = s.name
-    el.innerHTML = '<span>' + s.name + '</span><div class="slug-dot"></div>'
-    list.appendChild(el)
+    el.className = 'chip'
+    el.textContent = s.name
+    chips.appendChild(el)
   }
-  refreshDefaultSlugSelect()
+  const n = db?.slugs?.length ?? 0
+  document.getElementById('cs-stories').textContent = n + ' stor' + (n === 1 ? 'y' : 'ies')
+  refreshSlugSelect()
 }
 
-function refreshDefaultSlugSelect() {
+function refreshSlugSelect() {
   const sel  = document.getElementById('defaultSlug')
   const prev = sel.value
   sel.innerHTML = ''
   for (const s of (db?.slugs ?? [])) {
-    const o = document.createElement('option')
-    o.value = o.textContent = s.name
-    sel.appendChild(o)
+    const o = document.createElement('option'); o.value = o.textContent = s.name; sel.appendChild(o)
   }
   if (prev) sel.value = prev
 }
 
 async function addSlug() {
-  const input = document.getElementById('newSlugInput')
-  const name  = input.value.trim()
+  const inp  = document.getElementById('newSlugInput')
+  const name = inp.value.trim()
   if (!name) return
   const res = await fetch('/api/slug', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ name }),
   })
   db = await res.json()
-  input.value = ''
-  renderSlugs()
+  inp.value = ''
+  renderStories()
 }
 
-// ---------------------------------------------------------------------------
-// Session
-// ---------------------------------------------------------------------------
+// ── Session ───────────────────────────────────────────────────────────
 document.getElementById('sessionForm').addEventListener('submit', async e => {
   e.preventDefault()
   const data = Object.fromEntries(new FormData(e.target))
   const res  = await fetch('/api/session', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ show: '${SHOW}', ...data }),
   })
-  const j = await res.json()
-  session = j.session
-  db      = j.db
-  renderSlugs()
-  document.getElementById('sessionInfo').textContent = session.date + ' — ' + (session.output_path.split('/').pop() || session.output_path)
-  showPanel('scan')
+  const j  = await res.json()
+  session  = j.session
+  db       = j.db
+  renderStories()
+  const label = session.date + ' · ' + session.output_path.replace(/.*[\\\\/]/, '')
+  document.getElementById('cs-session').textContent   = label
+  document.getElementById('hdrSession').textContent   = 'Session: ' + session.date
+  closeCard('session')
+  updateCardNum()
 })
 
-// ---------------------------------------------------------------------------
-// Panel navigation
-// ---------------------------------------------------------------------------
-function showPanel(name) {
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'))
-  document.getElementById('panel-' + name).classList.add('active')
+// ── Camera ────────────────────────────────────────────────────────────
+function selCam(c) {
+  camSel = c
+  document.querySelectorAll('.cam-btn').forEach(b => b.classList.toggle('active', b.dataset.cam === c))
+  updateCardNum()
 }
 
-// ---------------------------------------------------------------------------
-// Camera selection
-// ---------------------------------------------------------------------------
-function selectCam(cam) {
-  selectedCam = cam
-  document.querySelectorAll('.cam-btn').forEach(b => b.classList.toggle('active', b.dataset.cam === cam))
-  updateCardNumLabel()
+function updateCardNum() {
+  if (!session) { document.getElementById('cardNumLabel').textContent = ''; return }
+  const n = (session.cards ?? []).filter(c => c.cam === camSel).length + 1
+  document.getElementById('cardNumLabel').textContent = 'Will be CARD ' + String(n).padStart(3,'0')
 }
 
-function updateCardNumLabel() {
-  if (!session) return
-  const existing = (session.cards ?? []).filter(c => c.cam === selectedCam).length
-  document.getElementById('cardNumLabel').textContent = 'CARD ' + String(existing + 1).padStart(3,'0')
+// ── Path drag-drop ────────────────────────────────────────────────────
+function setupDrop(wrapId, inputId) {
+  const wrap = document.getElementById(wrapId)
+  const inp  = document.getElementById(inputId)
+  if (!wrap || !inp) return
+  wrap.addEventListener('dragover', e => { e.preventDefault(); inp.classList.add('path-drop-active') })
+  wrap.addEventListener('dragleave', e => { if (!wrap.contains(e.relatedTarget)) inp.classList.remove('path-drop-active') })
+  wrap.addEventListener('drop', e => {
+    e.preventDefault()
+    inp.classList.remove('path-drop-active')
+    // file:// URI (Finder / Explorer drag)
+    const uriList = e.dataTransfer.getData('text/uri-list')
+    if (uriList) {
+      const line = uriList.split(/[\r\n]+/).find(l => l.startsWith('file://') && !l.startsWith('#'))
+      if (line) {
+        let p = decodeURIComponent(line.replace('file://', ''))
+        if (/^\\/[A-Za-z]:/.test(p)) p = p.slice(1)  // /C:/foo → C:/foo on Windows
+        inp.value = p.replace(/[\\/]+$/, '')
+        return
+      }
+    }
+    const text = e.dataTransfer.getData('text/plain')
+    if (text && text.trim()) inp.value = text.trim()
+  })
+}
+setupDrop('cardPathWrap',  'cardPath')
+setupDrop('outputWrap',    'outputPath')
+setupDrop('backupWrap',    'backupPath')
+setupDrop('avidWrap',      'avidPath')
+
+async function browsePath(inputId, btnId) {
+  const btn = btnId ? document.getElementById(btnId) : null
+  if (btn) { btn.disabled = true; btn.textContent = '…' }
+  try {
+    const res = await fetch('/api/browse')
+    const { path } = await res.json()
+    if (path) document.getElementById(inputId).value = path
+  } catch {}
+  if (btn) { btn.disabled = false; btn.textContent = 'Browse…' }
 }
 
-// ---------------------------------------------------------------------------
-// Scan
-// ---------------------------------------------------------------------------
+// ── Scan ──────────────────────────────────────────────────────────────
 async function startScan() {
-  if (!session) { alert('Create a session first'); return }
+  if (!session) { alert('Set up a session first (section 1).'); return }
   const cardPath    = document.getElementById('cardPath').value.trim()
   const defaultSlug = document.getElementById('defaultSlug').value
-  if (!cardPath) { alert('Enter a card path'); return }
+  if (!cardPath) { alert('Enter a card path.'); return }
 
   document.getElementById('scanBtn').disabled = true
-  document.getElementById('scanLog').style.display = 'block'
-  document.getElementById('scanLog').innerHTML = ''
+  document.getElementById('scanBtn').textContent = 'Scanning…'
   document.getElementById('thumbGrid').innerHTML = ''
   document.getElementById('addQueueRow').style.display = 'none'
-  currentScan = null
+  document.getElementById('cs-scan').textContent = 'scanning…'
+  curScan = null
+  opStart = Date.now()
 
-  const cardNum = (session.cards ?? []).filter(c => c.cam === selectedCam).length + 1
+  const cardNum = (session.cards ?? []).filter(c => c.cam === camSel).length + 1
+  logAdd('Scanning ' + cardPath + '…', 'info')
 
   const res = await fetch('/api/scan', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionId: session.id,
-      inputPath: cardPath,
-      cam: selectedCam,
-      cardNum,
-      defaultSlug,
-    }),
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ sessionId: session.id, inputPath: cardPath, cam: camSel, cardNum, defaultSlug }),
   })
   const { scanId, error } = await res.json()
-  if (error) { appendScanLog('Error: ' + error); document.getElementById('scanBtn').disabled = false; return }
+  if (error) {
+    logAdd('Scan error: ' + error, 'err')
+    document.getElementById('scanBtn').disabled = false
+    document.getElementById('scanBtn').textContent = 'Scan card'
+    return
+  }
 
-  currentScan = { scanId, clips: [], cam: selectedCam, cardNum, cardPath }
-
+  curScan = { scanId, clips: [], cam: camSel, cardNum, cardPath }
   const es = new EventSource('/api/scan-events/' + scanId)
-  es.addEventListener('log',     e => appendScanLog(e.data))
+  es.addEventListener('log',     e => logAdd(e.data, 'info'))
   es.addEventListener('preview', e => {
-    const clip = JSON.parse(e.data)
-    currentScan.clips.push(clip)
-    addThumbCard(clip, defaultSlug)
+    const clip = JSON.parse(e.data); curScan.clips.push(clip); addThumb(clip, defaultSlug)
   })
-  es.addEventListener('done', e => {
+  es.addEventListener('done', () => {
     es.close()
     document.getElementById('scanBtn').disabled = false
-    if (currentScan.clips.length > 0) {
-      document.getElementById('addQueueRow').style.display = 'flex'
-    }
+    document.getElementById('scanBtn').textContent = 'Scan card'
+    const n = curScan.clips.length
+    document.getElementById('cs-scan').textContent = n + ' clip' + (n !== 1 ? 's' : '') + ' found'
+    if (n > 0) { document.getElementById('addQueueRow').style.display = 'flex' }
+    logAdd('Scan complete — ' + n + ' clip(s) found.', 'ok')
   })
   es.addEventListener('error', e => {
     const d = e.data ? JSON.parse(e.data) : {}
-    appendScanLog('Error: ' + (d.message ?? 'scan failed'))
+    logAdd('Scan error: ' + (d.message ?? 'unknown'), 'err')
     es.close()
     document.getElementById('scanBtn').disabled = false
+    document.getElementById('scanBtn').textContent = 'Scan card'
   })
 }
 
-function appendScanLog(msg) {
-  const el = document.getElementById('scanLog')
-  const line = document.createElement('div')
-  line.textContent = msg
-  el.appendChild(line)
-  el.scrollTop = el.scrollHeight
-}
-
-function addThumbCard(clip, defaultSlug) {
-  const grid = document.getElementById('thumbGrid')
-  const card = document.createElement('div')
-  card.className = 'thumb-card'
-  card.id = 'tc_' + clip.name
-
-  const imgWrap = document.createElement('div')
-  imgWrap.className = 'thumb-img'
+function addThumb(clip, defaultSlug) {
+  const grid   = document.getElementById('thumbGrid')
+  const card   = document.createElement('div'); card.className = 'thumb'; card.id = 'tc_' + clip.name
+  const iw     = document.createElement('div'); iw.className = 'thumb-img'
 
   if (clip.previewPath) {
     const img = document.createElement('img')
-    img.src = '/api/preview?path=' + encodeURIComponent(clip.previewPath)
-    img.alt = clip.name
-    img.onclick = () => openLightbox(img.src, clip.name)
-    imgWrap.appendChild(img)
+    img.src   = '/api/preview?path=' + encodeURIComponent(clip.previewPath)
+    img.alt   = clip.name
+    img.onclick = () => { document.getElementById('lbImg').src = img.src; document.getElementById('lbLbl').textContent = clip.name; document.getElementById('lb').classList.add('open') }
+    iw.appendChild(img)
   } else {
-    const ph = document.createElement('div')
-    ph.className = 'thumb-ph'
-    ph.textContent = 'no preview'
-    imgWrap.appendChild(ph)
+    const ph = document.createElement('div'); ph.className = 'thumb-ph'; ph.textContent = 'no preview'; iw.appendChild(ph)
   }
 
-  const badge = document.createElement('div')
-  badge.className = 'thumb-badge'
-  badge.textContent = clip.codec + ' ' + clip.width + '×' + clip.height
-  imgWrap.appendChild(badge)
+  const badge = document.createElement('div'); badge.className = 'thumb-badge'
+  badge.textContent = clip.codec + ' ' + clip.width + '×' + clip.height; iw.appendChild(badge)
 
-  const footer = document.createElement('div')
-  footer.className = 'thumb-footer'
-  const nameEl = document.createElement('div')
-  nameEl.className = 'thumb-name'
-  nameEl.textContent = clip.originalName
-  nameEl.title = clip.name
-
-  const slugSel = document.createElement('select')
-  slugSel.className = 'thumb-slug-sel'
+  const foot = document.createElement('div'); foot.className = 'thumb-foot'
+  const nm   = document.createElement('div'); nm.className = 'thumb-name'; nm.textContent = clip.originalName; nm.title = clip.name
+  const sel  = document.createElement('select')
   for (const s of (db?.slugs ?? [])) {
-    const o = document.createElement('option')
-    o.value = o.textContent = s.name
-    slugSel.appendChild(o)
+    const o = document.createElement('option'); o.value = o.textContent = s.name; sel.appendChild(o)
   }
-  slugSel.value = defaultSlug ?? ''
-  slugSel.onchange = () => {
-    const c = currentScan.clips.find(c => c.name === clip.name)
-    if (c) c.slug = slugSel.value
-  }
-
-  footer.appendChild(nameEl)
-  footer.appendChild(slugSel)
-  card.appendChild(imgWrap)
-  card.appendChild(footer)
-  grid.appendChild(card)
+  sel.value = defaultSlug ?? ''
+  sel.onchange = () => { const c = curScan.clips.find(x => x.name === clip.name); if (c) c.slug = sel.value }
+  foot.appendChild(nm); foot.appendChild(sel)
+  card.appendChild(iw); card.appendChild(foot); grid.appendChild(card)
 }
 
 function clearScan() {
-  currentScan = null
+  curScan = null
   document.getElementById('thumbGrid').innerHTML = ''
-  document.getElementById('scanLog').style.display = 'none'
   document.getElementById('addQueueRow').style.display = 'none'
+  document.getElementById('cs-scan').textContent = ''
 }
 
-// ---------------------------------------------------------------------------
-// Queue
-// ---------------------------------------------------------------------------
+// ── Queue ─────────────────────────────────────────────────────────────
 async function addToQueue() {
-  if (!currentScan) return
-  // Commit slug assignments to server
-  await fetch('/api/scan-commit', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+  if (!curScan) return
+  const res = await fetch('/api/scan-commit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({
-      sessionId: session.id,
-      scanId:    currentScan.scanId,
-      clips:     currentScan.clips.map(c => ({ name: c.name, slug: c.slug })),
+      sessionId: session.id, scanId: curScan.scanId,
+      clips: curScan.clips.map(c => ({ name: c.name, slug: c.slug })),
     }),
   })
+  const { cardId } = await res.json()
+  const r2 = await fetch('/api/session/' + session.id)
+  session  = await r2.json()
 
-  // Refresh session
-  const res2 = await fetch('/api/session/' + session.id)
-  session    = await res2.json()
-
-  queue.push({ ...currentScan })
+  queue.push({ ...curScan, cardId })
   renderQueue()
   clearScan()
-  showPanel('ingest')
-  updateCardNumLabel()
+  updateCardNum()
+  openCard('queue')
 }
 
 function renderQueue() {
-  const list = document.getElementById('queueList')
+  const list = document.getElementById('qList')
+  if (queue.length === 0) {
+    list.innerHTML = '<div class="q-empty">Queue is empty — scan a card and add it above.</div>'
+    document.getElementById('ingestBtn').disabled = true
+    document.getElementById('cs-queue').textContent = 'empty'
+    return
+  }
   list.innerHTML = ''
   for (const item of queue) {
-    const el = document.createElement('div')
-    el.className = 'queue-item'
-    el.id = 'qi_' + item.scanId
-
-    const info = document.createElement('div')
-    info.className = 'queue-item-info'
-    info.innerHTML = '<div class="queue-item-title">CAM ' + item.cam + ' — CARD ' + String(item.cardNum).padStart(3,'0') + '</div>' +
-      '<div class="queue-item-meta">' + item.cardPath + ' · ' + item.clips.length + ' clips</div>'
-
-    const status = document.createElement('div')
-    status.className = 'queue-status'
-    status.textContent = 'queued'
-    status.id = 'qs_' + item.scanId
-
-    el.appendChild(info)
-    el.appendChild(status)
-    list.appendChild(el)
+    const el = document.createElement('div'); el.className = 'q-item'
+    const info = document.createElement('div'); info.className = 'q-info'
+    const ttl  = document.createElement('div'); ttl.className = 'q-title'
+    ttl.textContent = 'CAM ' + item.cam + ' — CARD ' + String(item.cardNum).padStart(3,'0')
+    const meta = document.createElement('div'); meta.className = 'q-meta'
+    meta.textContent = item.cardPath + ' · ' + item.clips.length + ' clip' + (item.clips.length !== 1 ? 's' : '')
+    info.appendChild(ttl); info.appendChild(meta)
+    const chip = document.createElement('div'); chip.className = 'q-chip'
+    chip.id = 'qc_' + item.scanId
+    chip.dataset.cardId = item.cardId || ''
+    chip.textContent = 'queued'
+    el.appendChild(info); el.appendChild(chip); list.appendChild(el)
   }
-  document.getElementById('ingestBtn').disabled = queue.length === 0
+  document.getElementById('ingestBtn').disabled = false
+  const totalC = queue.reduce((s, i) => s + i.clips.length, 0)
+  document.getElementById('cs-queue').textContent =
+    queue.length + ' card' + (queue.length !== 1 ? 's' : '') + ' · ' + totalC + ' clips'
 }
 
-// ---------------------------------------------------------------------------
-// Ingest
-// ---------------------------------------------------------------------------
+// ── Ingest ────────────────────────────────────────────────────────────
 async function startIngest() {
   if (!session || queue.length === 0) return
+  totalClips = queue.reduce((s, i) => s + i.clips.length, 0)
+  doneClips  = 0
+  opStart    = Date.now()
   document.getElementById('ingestBtn').disabled = true
-  document.getElementById('ingestLog').style.display = 'block'
-  document.getElementById('ingestLog').innerHTML = ''
+  openCard('progress')
+  setProgress('Starting…', 0)
 
   const res = await fetch('/api/ingest', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ sessionId: session.id }),
   })
   const { jobId, error } = await res.json()
-  if (error) { appendIngestLog('Error: ' + error); document.getElementById('ingestBtn').disabled = false; return }
+  if (error) { logAdd('Error: ' + error, 'err'); return }
 
   const es = new EventSource('/api/ingest-events/' + jobId)
-  es.addEventListener('log',      e => appendIngestLog(e.data))
-  es.addEventListener('backup',   e => setQueueStatus(JSON.parse(e.data).cardId, 'backing up…', 'active'))
-  es.addEventListener('transcode',e => {
+
+  es.addEventListener('log', e => logAdd(e.data, 'info'))
+
+  es.addEventListener('backup', e => {
     const p = JSON.parse(e.data)
-    if (p.status === 'started') setClipBadge(p.clip, 'active')
-    if (p.status === 'done')    setClipBadge(p.clip, 'done')
-    setQueueStatus(p.cardId, p.index + '/' + p.total, 'active')
+    setQueueChip(p.cardId, 'Backing up…', 'backing')
+    setProgress('Backing up originals…', doneClips / totalClips)
   })
+
+  es.addEventListener('transcode', e => {
+    const p = JSON.parse(e.data)
+    if (p.status === 'started') {
+      setThumbBadge(p.clip, 'xcode')
+      setQueueChip(p.cardId, (p.index||'?') + ' / ' + (p.total||'?'), 'running')
+      setProgress('Transcoding ' + p.clip, doneClips / totalClips)
+      logAdd('[' + (p.index||'?') + '/' + (p.total||'?') + '] ' + p.clip, 'xcode')
+    }
+    if (p.status === 'done') {
+      setThumbBadge(p.clip, 'done')
+      doneClips++
+      setProgress('Transcoding…', doneClips / totalClips)
+    }
+  })
+
   es.addEventListener('card-done', e => {
     const p = JSON.parse(e.data)
-    setQueueStatus(p.cardId, 'done', 'done')
+    setQueueChip(p.cardId, 'done ✓', 'done')
   })
+
   es.addEventListener('done', e => {
     const result = JSON.parse(e.data)
     es.close()
-    renderStoryResults(result)
+    setProgress('Complete', 1)
+    logAdd('Ingest complete — ' + totalClips + ' clip(s) processed.', 'ok')
+    document.getElementById('cs-progress').textContent = 'complete'
+    renderAleLinks(result.stories)
   })
+
   es.addEventListener('error', e => {
     const d = e.data ? JSON.parse(e.data) : {}
-    appendIngestLog('Error: ' + (d.message ?? 'unknown'))
+    logAdd('Error: ' + (d.message ?? 'unknown'), 'err')
     es.close()
     document.getElementById('ingestBtn').disabled = false
   })
 }
 
-function appendIngestLog(msg) {
-  const el = document.getElementById('ingestLog')
-  const line = document.createElement('div')
-  line.textContent = msg
-  el.appendChild(line)
-  el.scrollTop = el.scrollHeight
+// ── Progress helpers ──────────────────────────────────────────────────
+function setProgress(op, frac) {
+  document.getElementById('progOp').textContent   = op
+  document.getElementById('progFrac').textContent = doneClips + ' / ' + totalClips + ' clips'
+  document.getElementById('progBar').style.width  = Math.min(100, Math.round(frac * 100)) + '%'
+  document.getElementById('cs-progress').textContent = Math.min(100, Math.round(frac * 100)) + '%'
 }
 
-function setQueueStatus(cardId, text, cls) {
-  const el = document.querySelector('[id^="qs_"]')
-  if (!el) return
-  // find by cardId in queue mapping — simplified
-  document.querySelectorAll('.queue-status').forEach(s => {
-    if (s.dataset.cardId === cardId) {
-      s.textContent = text
-      s.className = 'queue-status ' + (cls ?? '')
-    }
+function setQueueChip(cardId, text, cls) {
+  document.querySelectorAll('.q-chip').forEach(c => {
+    if (c.dataset.cardId === cardId) { c.textContent = text; c.className = 'q-chip ' + cls }
   })
 }
 
-function setClipBadge(clipName, status) {
-  const el = document.getElementById('tc_' + clipName)
+function setThumbBadge(name, cls) {
+  const el = document.getElementById('tc_' + name)
   if (!el) return
-  const badge = el.querySelector('.thumb-badge')
-  if (badge) { badge.className = 'thumb-badge ' + status }
+  const b = el.querySelector('.thumb-badge')
+  if (b) b.className = 'thumb-badge ' + cls
 }
 
-function renderStoryResults(result) {
-  const el = document.getElementById('storyResults')
-  el.innerHTML = '<div style="font-size:13px;font-weight:600;margin:24px 0 12px">Story ALEs</div>'
+// ── Log ───────────────────────────────────────────────────────────────
+function logAdd(msg, type) {
+  const log = document.getElementById('mainLog')
+  // Clear the placeholder on first real message
+  if (log.children.length === 1 && log.firstChild?.textContent?.includes('Waiting')) log.innerHTML = ''
+  const line = document.createElement('div'); line.className = 'log-line'
+  const elapsed = Math.floor((Date.now() - (opStart || Date.now())) / 1000)
+  const ts = String(Math.floor(elapsed/60)).padStart(2,'0') + ':' + String(elapsed%60).padStart(2,'0')
+  const t  = document.createElement('span'); t.className = 'log-ts'; t.textContent = ts
+  const m  = document.createElement('span'); m.className = 'log-txt ' + (type||'info'); m.textContent = msg
+  line.appendChild(t); line.appendChild(m); log.appendChild(line)
+  log.scrollTop = log.scrollHeight
+}
 
-  const dl = document.createElement('div')
-  dl.className = 'downloads'
-
-  for (const { slug, alePath, fcpxmlPath, clipCount } of result.stories) {
+// ── ALE links ─────────────────────────────────────────────────────────
+function renderAleLinks(stories) {
+  const row = document.getElementById('aleRow')
+  row.innerHTML = ''
+  for (const { slug, alePath, fcpxmlPath, clipCount } of (stories ?? [])) {
     if (alePath) {
-      const a = document.createElement('a')
-      a.className = 'dl-btn'
+      const a = document.createElement('a'); a.className = 'ale-btn'
       a.href = '/api/download?path=' + encodeURIComponent(alePath)
-      a.download = basename(alePath)
-      a.textContent = '↓ ' + basename(alePath) + ' (' + clipCount + ' clips)'
-      dl.appendChild(a)
+      a.download = alePath.split(/[\\\\/]/).pop()
+      a.textContent = '↓ ' + a.download + ' (' + clipCount + ')'
+      row.appendChild(a)
     }
     if (fcpxmlPath) {
-      const a = document.createElement('a')
-      a.className = 'dl-btn'
+      const a = document.createElement('a'); a.className = 'ale-btn'
       a.href = '/api/download?path=' + encodeURIComponent(fcpxmlPath)
-      a.download = basename(fcpxmlPath)
-      a.textContent = '↓ ' + basename(fcpxmlPath)
-      dl.appendChild(a)
+      a.download = fcpxmlPath.split(/[\\\\/]/).pop()
+      a.textContent = '↓ ' + a.download
+      row.appendChild(a)
     }
   }
-
-  el.appendChild(dl)
+  if (row.children.length) row.style.display = 'flex'
 }
 
-function basename(p) { return p.split('/').pop() }
-
-// ---------------------------------------------------------------------------
-// Lightbox
-// ---------------------------------------------------------------------------
-function openLightbox(src, name) {
-  document.getElementById('lbImg').src  = src
-  document.getElementById('lbLbl').textContent = name
-  document.getElementById('lb').classList.add('open')
-}
-
-// ---------------------------------------------------------------------------
-// Boot
-// ---------------------------------------------------------------------------
 init()
 </script>
 </body>
@@ -831,9 +879,9 @@ const server = createServer(async (req, res) => {
 
   // Create/get session
   if (req.method === 'POST' && url.pathname === '/api/session') {
-    const params = await body()
-    const today  = new Date()
-    const date   = params.date || (String(today.getMonth()+1).padStart(2,'0') + String(today.getDate()).padStart(2,'0'))
+    const params  = await body()
+    const today   = new Date()
+    const date    = params.date || (String(today.getMonth()+1).padStart(2,'0') + String(today.getDate()).padStart(2,'0'))
     const session = await getOrCreateSession(show.id, {
       date,
       outputPath: params.output,
@@ -847,12 +895,35 @@ const server = createServer(async (req, res) => {
     return
   }
 
-  // Get session
+  // Get session with cards
   if (req.method === 'GET' && url.pathname.startsWith('/api/session/')) {
     const sessionId = url.pathname.split('/api/session/')[1]
     const session   = await getSessionWithCards(sessionId)
     if (!session) { json({ error: 'Session not found' }, 404); return }
     json(session)
+    return
+  }
+
+  // Native folder picker
+  if (req.method === 'GET' && url.pathname === '/api/browse') {
+    try {
+      let path = null
+      if (process.platform === 'darwin') {
+        path = execSync(
+          "osascript -e 'POSIX path of (choose folder with prompt \"Select folder\")'",
+          { timeout: 60000 }
+        ).toString().trim().replace(/\/$/, '')
+      } else if (process.platform === 'win32') {
+        const r = spawnSync('powershell', [
+          '-NoProfile', '-Command',
+          "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Select folder'; $d.RootFolder = 'MyComputer'; $null = $d.ShowDialog(); $d.SelectedPath",
+        ], { timeout: 60000, encoding: 'utf8' })
+        path = r.stdout?.trim() || null
+      }
+      json({ path: path || null })
+    } catch {
+      json({ path: null })
+    }
     return
   }
 
@@ -865,10 +936,8 @@ const server = createServer(async (req, res) => {
     const scanId = randomUUID()
     const jobId  = createJob()
     scans.set(scanId, { jobId, clips: [], params })
-
     json({ scanId })
 
-    // Run scan async
     scanCard(
       {
         inputPath: params.inputPath,
@@ -880,7 +949,7 @@ const server = createServer(async (req, res) => {
         log:       session.log_preset,
         fps:       session.fps,
       },
-      (event) => {
+      event => {
         const scan = scans.get(scanId)
         if (!scan) return
         emitToJob(scan.jobId, event.type, event.type === 'preview' ? event.clip : event.data)
@@ -901,24 +970,19 @@ const server = createServer(async (req, res) => {
     if (!scan) { res.writeHead(404); res.end(); return }
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
-
     const job = jobs.get(scan.jobId)
-    for (const ev of job.events) {
-      res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev.data)}\n\n`)
-    }
-
+    for (const ev of job.events) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev.data)}\n\n`)
     if (!job.clients.includes(res)) job.clients.push(res)
     req.on('close', () => { job.clients = job.clients.filter(c => c !== res) })
     return
   }
 
-  // Commit scan → add card to session
+  // Commit scan → add card + clips to DB
   if (req.method === 'POST' && url.pathname === '/api/scan-commit') {
     const { sessionId, scanId, clips: assignments } = await body()
     const scan = scans.get(scanId)
     if (!scan) { json({ error: 'Scan not found' }, 404); return }
 
-    // Apply slug assignments back to scan clips
     for (const clip of scan.clips) {
       const assign = assignments.find(a => a.name === clip.name)
       if (assign) clip.slug = assign.slug
@@ -937,16 +1001,13 @@ const server = createServer(async (req, res) => {
       await addClip(card.id, { ...clip, slugId: slugRow?.id ?? null })
     }
 
-    // Run relay detection across all cards in this session (idempotent)
     const session = await getSession(sessionId)
     if (session) {
       const relays = await detectRelays(sessionId, session.fps ?? '25')
-      if (relays.length > 0) {
-        console.log(`[relay] ${relays.length} span(s) detected in session ${sessionId}`)
-      }
+      if (relays.length > 0) console.log(`[relay] ${relays.length} span(s) detected`)
     }
 
-    json({ ok: true })
+    json({ ok: true, cardId: card.id })
     return
   }
 
@@ -959,14 +1020,12 @@ const server = createServer(async (req, res) => {
     const jobId = createJob()
     json({ jobId })
 
-    // Run ingest async
     ;(async () => {
       const emit = (type, data) => emitToJob(jobId, type, data)
 
-      // Re-run relay detection with all cards present before transcoding
       await detectRelays(sessionId, session.fps ?? '25')
 
-      // Collect all clips across all cards, build relay group map
+      // Build relay group map
       const allClips = session.cards.flatMap(card =>
         card.clips.map(clip => ({ ...clip, cardData: card }))
       )
@@ -983,50 +1042,48 @@ const server = createServer(async (req, res) => {
       const transcodeOpts = {
         date:   session.date,
         output: session.output_path,
-        avid:   session.avid_path,
         log:    session.log_preset,
         fps:    session.fps ?? '25',
       }
 
       for (const card of session.cards) {
         if (card.status === 'complete') continue
-
         await updateCardStatus(card.id, 'ingesting')
 
-        // 1. Backup all originals on this card
+        // 1. Backup
         emit('backup', { cardId: card.id })
         try {
-          await backupCard({ card, date: session.date, backupRoot: session.backup_path }, (ev) => emit(ev.type, ev.data))
+          await backupCard(
+            { card, date: session.date, backupRoot: session.backup_path },
+            ev => emit(ev.type, ev.data)
+          )
         } catch (e) {
           emit('log', `Backup warning: ${e.message}`)
         }
 
-        // 2. Transcode clips on this card
+        // 2. Transcode
         let index = 0
         for (const clip of card.clips) {
           index++
 
-          // Skip relay continuations — they will be merged into part 1's proxy
           if ((clip.relay_part ?? 0) > 1) {
             emit('log', `[${clip.name}] relay part ${clip.relay_part} — merged into part 1 proxy`)
             continue
           }
 
           emit('transcode', { cardId: card.id, clip: clip.name, index, total: card.clips.length, status: 'started' })
-          emit('log', `[${index}/${card.clips.length}] ${clip.name}`)
 
           try {
             if (clip.relay_group && clip.relay_part === 1) {
-              // Relay part 1 — concat all parts with filter_complex
               const parts = relayGroupMap[clip.relay_group] ?? [clip]
               await transcodeRelayGroup(
                 { parts, ...transcodeOpts },
-                (ev) => emit(ev.type, { ...ev.data, cardId: card.id })
+                ev => emit(ev.type, { ...ev.data, cardId: card.id })
               )
             } else {
               await transcodeCard(
                 { card: { ...card, clips: [clip] }, ...transcodeOpts },
-                (ev) => emit(ev.type, { ...ev.data, cardId: card.id })
+                ev => emit(ev.type, { ...ev.data, cardId: card.id })
               )
             }
             emit('transcode', { cardId: card.id, clip: clip.name, index, total: card.clips.length, status: 'done' })
@@ -1039,33 +1096,37 @@ const server = createServer(async (req, res) => {
         emit('card-done', { cardId: card.id })
       }
 
-      // Write relay sidecar manifest to output root
+      // Move session staging folder into AvidMediaFiles
+      if (session.avid_path) {
+        const stagingDir = join(session.output_path, '_staging', session.date)
+        commitSessionToAvid(
+          { stagingDir, avidRoot: session.avid_path, sessionFolder: `${SHOW}_${session.date}` },
+          ev => emit(ev.type, ev.data)
+        )
+      }
+
+      // Relay manifest
       const allRelayGroups = Object.values(relayGroupMap).filter(p => p.length > 1)
       if (allRelayGroups.length > 0) {
         const manifest = {
-          session: sessionId,
-          date:    session.date,
-          relays:  allRelayGroups.map(parts => ({
+          session: sessionId, date: session.date,
+          relays: allRelayGroups.map(parts => ({
             relay_group: parts[0].relay_group,
             parts: parts.map(p => ({
-              relay_part: p.relay_part,
-              clip_name:  p.name,
-              file_path:  p.file_path,
-              start_tc:   p.start_tc,
-              end_tc:     p.end_tc,
-              card:       p.cardData?.card_num ?? p.card_num,
+              relay_part: p.relay_part, clip_name: p.name,
+              file_path: p.file_path, start_tc: p.start_tc, end_tc: p.end_tc,
+              card: p.cardData?.card_num ?? p.card_num,
             })),
           })),
         }
         mkdirSync(session.output_path, { recursive: true })
         writeFileSync(join(session.output_path, 'session-relays.json'), JSON.stringify(manifest, null, 2), 'utf8')
-        emit('log', `Relay manifest: session-relays.json (${allRelayGroups.length} group(s))`)
+        emit('log', `Relay manifest written (${allRelayGroups.length} group(s))`)
       }
 
-      // Build per-story ALEs
+      // Build per-story ALEs + FCPXML
       const storyMap = await clipsBySlug(sessionId)
       const stories  = []
-
       mkdirSync(session.output_path, { recursive: true })
 
       for (const [slug, clips] of Object.entries(storyMap)) {
@@ -1073,10 +1134,8 @@ const server = createServer(async (req, res) => {
         const fcpxmlContent = buildFCPXML(clips, session.fps, slug, session.date, session.output_path)
         const alePath       = join(session.output_path, `${session.date}_${slug}.ale`)
         const fcpxmlPath    = join(session.output_path, `${session.date}_${slug}.fcpxml`)
-
         writeFileSync(alePath,    aleContent,    'utf8')
         writeFileSync(fcpxmlPath, fcpxmlContent, 'utf8')
-
         emit('log', `ALE: ${alePath} (${clips.length} clips)`)
         stories.push({ slug, alePath, fcpxmlPath, clipCount: clips.length })
       }
@@ -1091,7 +1150,6 @@ const server = createServer(async (req, res) => {
     const jobId = url.pathname.split('/api/ingest-events/')[1]
     const job   = jobs.get(jobId)
     if (!job) { res.writeHead(404); res.end(); return }
-
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' })
     for (const ev of job.events) res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev.data)}\n\n`)
     job.clients.push(res)
