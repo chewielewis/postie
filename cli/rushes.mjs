@@ -278,10 +278,10 @@ input::placeholder { color:var(--m2) }
           <div class="field">
             <label>Log format</label>
             <select name="log">
-              <option value="none">None — already Rec.709</option>
+              <option value="slog3" selected>S-Log3 → 709 (Sony)</option>
               <option value="slog2">S-Log2 → 709 (Sony)</option>
-              <option value="slog3">S-Log3 → 709 (Sony)</option>
               <option value="dlogm">D-Log M → 709 (DJI)</option>
+              <option value="none">None — already Rec.709</option>
             </select>
           </div>
         </div>
