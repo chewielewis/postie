@@ -42,6 +42,10 @@ next-env.d.ts
 
 # LUT files — licensed, not for distribution
 cli/luts/*.cube
+ingestor/luts/*.cube
 
 # CLI env
 cli/.env
+ingestor/.env
+ingestor/_staging/
+__pycache__/

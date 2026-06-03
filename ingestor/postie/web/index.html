@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Postie Ingestor — __SHOW__</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0a;--s1:#111;--s2:#181818;--s3:#222;--b:#2a2a2a;
+  --t:#e8e8e8;--m:#777;--m2:#555;--accent:__ACCENT__;
+  --green:#4ade80;--blue:#60a5fa;--amber:#fbbf24;
+}
+body{background:var(--bg);color:var(--t);font-family:system-ui,sans-serif;font-size:14px}
+a{color:inherit;text-decoration:none}
+.app{display:grid;grid-template-columns:300px 1fr;min-height:100vh}
+.sidebar{background:var(--s1);border-right:1px solid var(--b);padding:24px 20px;display:flex;flex-direction:column;gap:22px}
+.main{padding:32px 30px;overflow-y:auto}
+.logo{font-size:13px;font-weight:700;letter-spacing:.12em;color:var(--accent)}
+.badge{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;background:#ffffff10;color:var(--m);margin-top:6px}
+.gpu{font-size:10px;color:var(--m2);margin-top:4px}
+.sec{display:flex;flex-direction:column;gap:8px}
+.sec-label{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:var(--m2)}
+.steps{display:flex;flex-direction:column;gap:2px;margin-top:4px}
+.step{display:flex;align-items:center;gap:9px;font-size:12px;padding:7px 10px;border-radius:6px;color:var(--m);cursor:pointer}
+.step:hover{background:var(--s2)}
+.step.active{background:var(--accent)18;color:var(--t)}
+.step.done .step-n{background:var(--green);color:#000;border-color:var(--green)}
+.step-n{width:18px;height:18px;border-radius:50%;border:1px solid var(--b);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600}
+.step.active .step-n{border-color:var(--accent);color:var(--accent)}
+.slug-list{display:flex;flex-direction:column;gap:4px}
+.slug-item{display:flex;align-items:center;gap:7px;font-size:12px;padding:6px 10px;border-radius:6px;background:var(--s2);border:1px solid var(--b)}
+.slug-dot{width:6px;height:6px;border-radius:50%;background:var(--accent)}
+.slug-add{display:flex;gap:6px;margin-top:4px}
+.slug-add input{flex:1;background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:6px;padding:7px 10px;font-size:12px;outline:none}
+.slug-add button{background:var(--s3);border:1px solid var(--b);color:var(--t);border-radius:6px;padding:7px 12px;font-size:12px;cursor:pointer}
+.panel{display:none}
+.panel.active{display:block}
+.panel-title{font-size:18px;font-weight:600;margin-bottom:5px}
+.panel-sub{font-size:12px;color:var(--m);margin-bottom:26px}
+.form{display:flex;flex-direction:column;gap:14px;max-width:580px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field{display:flex;flex-direction:column;gap:5px}
+.field label{font-size:11px;color:var(--m);text-transform:uppercase;letter-spacing:.05em}
+input,select{background:var(--s1);border:1px solid var(--b);color:var(--t);border-radius:8px;padding:9px 13px;font-size:13px;outline:none;width:100%}
+input:focus,select:focus{border-color:#444}
+input::placeholder{color:var(--m2)}
+.hint{font-size:11px;color:var(--m2);margin-top:2px}
+.btn{display:inline-flex;align-items:center;gap:8px;background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:8px;padding:10px 18px;font-size:13px;font-weight:500;cursor:pointer;transition:background .15s;white-space:nowrap}
+.btn:hover{background:var(--s3)}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.primary{background:var(--accent)22;border-color:var(--accent)55;color:var(--accent)}
+.btn.primary:hover{background:var(--accent)33}
+.btn-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:6px}
+.cam-selector{display:flex;gap:6px}
+.cam-btn{width:38px;height:38px;border-radius:8px;border:1px solid var(--b);background:var(--s2);color:var(--m);font-size:13px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s}
+.cam-btn:hover{border-color:#444;color:var(--t)}
+.cam-btn.active{border-color:var(--accent);background:var(--accent)22;color:var(--accent)}
+.thumb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;margin:20px 0}
+.thumb-card{background:var(--s1);border:1px solid var(--b);border-radius:8px;overflow:hidden}
+.thumb-img{position:relative;aspect-ratio:16/9;background:#000;cursor:zoom-in}
+.thumb-img img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb-ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;color:var(--m2);font-size:11px}
+.thumb-badge{position:absolute;top:6px;right:6px;font-size:9px;font-weight:600;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.78);color:#aaa}
+.thumb-badge.done{color:var(--green)}
+.thumb-badge.active{color:var(--accent)}
+.thumb-footer{padding:8px 10px 10px}
+.thumb-name{font-family:ui-monospace,monospace;font-size:10px;color:var(--m);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.thumb-meta{font-size:9px;color:var(--m2);margin-top:2px}
+.thumb-slug{margin-top:6px;width:100%;background:var(--s2);border:1px solid var(--b);color:var(--t);border-radius:5px;padding:4px 7px;font-size:11px;outline:none}
+.lb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:200;align-items:center;justify-content:center;cursor:zoom-out}
+.lb.open{display:flex}
+.lb img{max-width:90vw;max-height:90vh;border-radius:4px}
+.lb-lbl{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);font-family:monospace;font-size:11px;color:#aaa;background:rgba(0,0,0,.7);padding:5px 12px;border-radius:6px}
+.log{background:#000;border:1px solid var(--b);border-radius:8px;padding:12px 14px;font-family:ui-monospace,monospace;font-size:11px;color:var(--m);max-height:200px;overflow-y:auto;line-height:1.7;margin:16px 0}
+.queue-list{display:flex;flex-direction:column;gap:8px;margin:16px 0}
+.queue-item{display:flex;align-items:center;justify-content:space-between;background:var(--s1);border:1px solid var(--b);border-radius:8px;padding:11px 15px}
+.qi-title{font-size:13px;font-weight:500}
+.qi-meta{font-size:11px;color:var(--m);margin-top:2px}
+.qstat{font-size:11px;padding:3px 9px;border-radius:5px;background:var(--s2);color:var(--m)}
+.qstat.done{background:var(--green)15;color:var(--green)}
+.qstat.active{background:var(--accent)15;color:var(--accent)}
+.downloads{display:flex;gap:8px;flex-wrap:wrap;margin-top:18px}
+.dl-btn{display:inline-flex;align-items:center;gap:8px;background:var(--s1);border:1px solid var(--b);border-radius:8px;padding:10px 15px;font-size:12px;color:var(--t);cursor:pointer}
+.dl-btn:hover{background:var(--s2)}
+.empty{color:var(--m2);font-size:12px;padding:14px 0}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div>
+      <div class="logo">POSTIE INGESTOR</div>
+      <div class="badge">__SHOW__</div>
+      <div class="gpu" id="gpuLine"></div>
+    </div>
+    <div class="sec">
+      <div class="sec-label">Pipeline</div>
+      <div class="steps" id="steps">
+        <div class="step active" data-step="session" onclick="showPanel('session')"><div class="step-n">1</div>Session setup</div>
+        <div class="step" data-step="scan" onclick="showPanel('scan')"><div class="step-n">2</div>Scan &amp; copy cards</div>
+        <div class="step" data-step="ingest" onclick="showPanel('ingest')"><div class="step-n">3</div>Transcode &amp; deliver</div>
+      </div>
+    </div>
+    <div class="sec">
+      <div class="sec-label">Session</div>
+      <div id="sessionInfo" style="font-size:12px;color:var(--m)">No session yet</div>
+    </div>
+    <div class="sec">
+      <div class="sec-label">Stories this season</div>
+      <div class="slug-list" id="slugList"></div>
+      <div class="slug-add">
+        <input id="newSlug" placeholder="New story slug…" maxlength="24" onkeydown="if(event.key==='Enter')addSlug()">
+        <button onclick="addSlug()">+</button>
+      </div>
+    </div>
+    <div style="flex:1"></div>
+    <div style="font-size:10px;color:var(--m2)">localhost:__PORT__</div>
+  </aside>
+
+  <main class="main">
+    <!-- Session -->
+    <div id="panel-session" class="panel active">
+      <div class="panel-title">Session setup</div>
+      <div class="panel-sub">One session per shoot day. Settings persist and are shared across cards.</div>
+      <form class="form" id="sessionForm">
+        <div class="row">
+          <div class="field"><label>Shoot date (MMDD)</label><input name="date" id="dateInput" maxlength="4" placeholder="0603" required></div>
+          <div class="field"><label>Log format</label>
+            <select name="log">
+              <option value="slog3" selected>S-Log3 → 709 (Sony)</option>
+              <option value="slog2">S-Log2 → 709 (Sony)</option>
+              <option value="dlogm">D-Log M → 709 (DJI)</option>
+              <option value="none">None — already Rec.709</option>
+            </select>
+          </div>
+        </div>
+        <div class="field"><label>Output root</label><input name="output" placeholder="/Volumes/AvidServer/Ingest" required></div>
+        <div class="field"><label>Backup drive</label><input name="backup" placeholder="/Volumes/SHOW_BACKUP">
+          <span class="hint">Originals are verified-copied here before transcode. Eject the card once copy completes.</span></div>
+        <div class="field"><label>AvidMediaFiles path</label><input name="avid" placeholder="/Volumes/AvidServer/Avid MediaFiles/MXF/1">
+          <span class="hint">Proxies move here automatically once verified.</span></div>
+        <div class="row">
+          <div class="field"><label>Frame rate</label>
+            <select name="fps"><option value="25" selected>25</option><option value="29.97">29.97</option><option value="50">50</option><option value="23.976">23.976</option><option value="24">24</option></select>
+          </div>
+        </div>
+        <div class="btn-row"><button type="submit" class="btn primary">Create session →</button></div>
+      </form>
+    </div>
+
+    <!-- Scan -->
+    <div id="panel-scan" class="panel">
+      <div class="panel-title">Scan &amp; copy cards</div>
+      <div class="panel-sub">Insert one card, scan it, assign stories, then copy + verify to backup.</div>
+      <div class="form" style="max-width:580px;margin-bottom:22px">
+        <div class="row">
+          <div class="field"><label>Card path</label><input id="cardPath" placeholder="/Volumes/CARD_001"></div>
+          <div class="field"><label>Camera</label><div class="cam-selector" id="camSelector"></div></div>
+        </div>
+        <div class="field"><label>Default story</label><select id="defaultSlug"></select></div>
+        <div class="btn-row">
+          <button class="btn primary" id="scanBtn" onclick="startScan()">Scan card</button>
+          <span id="cardNumLabel" style="font-size:12px;color:var(--m)"></span>
+        </div>
+      </div>
+      <div id="scanLog" class="log" style="display:none"></div>
+      <div id="thumbGrid" class="thumb-grid"></div>
+      <div id="commitRow" class="btn-row" style="display:none">
+        <button class="btn primary" id="commitBtn" onclick="commitCard()">Copy + verify → add card</button>
+        <button class="btn" onclick="clearScan()">Discard scan</button>
+      </div>
+    </div>
+
+    <!-- Ingest -->
+    <div id="panel-ingest" class="panel">
+      <div class="panel-title">Transcode &amp; deliver</div>
+      <div class="panel-sub">Reconcile relays, transcode to DNxHR LB, move to Avid, write ALE + FCPXML.</div>
+      <div class="queue-list" id="queueList"></div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn primary" id="ingestBtn" onclick="startIngest()">Start ingest</button>
+        <button class="btn" onclick="showPanel('scan')">← Add more cards</button>
+      </div>
+      <div id="ingestLog" class="log" style="display:none"></div>
+      <div id="storyResults"></div>
+    </div>
+  </main>
+</div>
+
+<div class="lb" id="lb" onclick="this.classList.remove('open')"><img id="lbImg" src="" alt=""><div class="lb-lbl" id="lbLbl"></div></div>
+
+<script>
+const SHOW='__SHOW__';
+let db=null, session=null, currentScan=null, selectedCam='A';
+const queue=[];
+
+async function init(){
+  const r=await fetch('/api/db'); db=await r.json();
+  document.getElementById('gpuLine').textContent=db.gpu||'';
+  renderSlugs();
+  const n=new Date();
+  document.getElementById('dateInput').value=String(n.getMonth()+1).padStart(2,'0')+String(n.getDate()).padStart(2,'0');
+  const cs=document.getElementById('camSelector');
+  cs.innerHTML=['A','B','C','D','E','F'].map(c=>`<button type="button" class="cam-btn" data-cam="${c}" onclick="selectCam('${c}')">${c}</button>`).join('');
+  selectCam('A');
+}
+function setStep(name,done){document.querySelectorAll('.step').forEach(s=>{if(s.dataset.step===name){if(done)s.classList.add('done')}})}
+function showPanel(name){
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  document.querySelectorAll('.step').forEach(s=>s.classList.toggle('active',s.dataset.step===name));
+}
+function renderSlugs(){
+  const list=document.getElementById('slugList'); list.innerHTML='';
+  for(const s of (db?.slugs||[])){const el=document.createElement('div');el.className='slug-item';el.innerHTML='<div class="slug-dot"></div><span>'+s.name+'</span>';list.appendChild(el)}
+  const sel=document.getElementById('defaultSlug'); if(sel){const prev=sel.value;sel.innerHTML='';for(const s of (db?.slugs||[])){const o=document.createElement('option');o.value=o.textContent=s.name;sel.appendChild(o)}if(prev)sel.value=prev}
+}
+async function addSlug(){
+  const i=document.getElementById('newSlug'); const name=i.value.trim(); if(!name)return;
+  const r=await fetch('/api/slug',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  db=await r.json(); i.value=''; renderSlugs();
+}
+document.getElementById('sessionForm').addEventListener('submit',async e=>{
+  e.preventDefault();
+  const data=Object.fromEntries(new FormData(e.target));
+  const r=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  const j=await r.json(); session=j.session; db=j.db; renderSlugs();
+  document.getElementById('sessionInfo').innerHTML='<b>'+session.date+'</b><br>'+session.output_path;
+  setStep('session',true); updateCardNum(); showPanel('scan');
+});
+function selectCam(c){selectedCam=c;document.querySelectorAll('.cam-btn').forEach(b=>b.classList.toggle('active',b.dataset.cam===c));updateCardNum()}
+function updateCardNum(){
+  if(!session)return;
+  const n=(session.cards||[]).filter(c=>c.cam===selectedCam).length+1;
+  document.getElementById('cardNumLabel').textContent='→ CAM '+selectedCam+' CARD '+String(n).padStart(3,'0');
+}
+async function startScan(){
+  if(!session){alert('Create a session first');return}
+  const cardPath=document.getElementById('cardPath').value.trim();
+  const defaultSlug=document.getElementById('defaultSlug').value;
+  if(!cardPath){alert('Enter a card path');return}
+  document.getElementById('scanBtn').disabled=true;
+  const sl=document.getElementById('scanLog');sl.style.display='block';sl.innerHTML='';
+  document.getElementById('thumbGrid').innerHTML='';
+  document.getElementById('commitRow').style.display='none';
+  const cardNum=(session.cards||[]).filter(c=>c.cam===selectedCam).length+1;
+  currentScan={clips:[],cam:selectedCam,cardNum,cardPath};
+  const r=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:session.id,inputPath:cardPath,cam:selectedCam,cardNum,defaultSlug})});
+  const {jobId,error}=await r.json();
+  if(error){logScan('Error: '+error);document.getElementById('scanBtn').disabled=false;return}
+  const es=new EventSource('/api/events/'+jobId);
+  es.addEventListener('log',e=>logScan(JSON.parse(e.data).message));
+  es.addEventListener('preview',e=>{const clip=JSON.parse(e.data);currentScan.clips.push(clip);addThumb(clip,defaultSlug)});
+  es.addEventListener('done',e=>{es.close();document.getElementById('scanBtn').disabled=false;if(currentScan.clips.length)document.getElementById('commitRow').style.display='flex'});
+  es.addEventListener('failed',e=>{logScan('Error: '+(JSON.parse(e.data).message||'scan failed'));es.close();document.getElementById('scanBtn').disabled=false});
+}
+function logScan(m){const el=document.getElementById('scanLog');const d=document.createElement('div');d.textContent=m;el.appendChild(d);el.scrollTop=el.scrollHeight}
+function addThumb(clip,defaultSlug){
+  const g=document.getElementById('thumbGrid');const c=document.createElement('div');c.className='thumb-card';c.id='tc_'+cssId(clip.name);
+  const w=document.createElement('div');w.className='thumb-img';
+  if(clip.preview_path){const img=document.createElement('img');img.src='/api/preview?path='+encodeURIComponent(clip.preview_path);img.onclick=()=>openLb(img.src,clip.name);w.appendChild(img)}
+  else{const ph=document.createElement('div');ph.className='thumb-ph';ph.textContent='no preview';w.appendChild(ph)}
+  const b=document.createElement('div');b.className='thumb-badge';b.textContent=clip.codec+' '+clip.width+'×'+clip.height;w.appendChild(b);
+  const f=document.createElement('div');f.className='thumb-footer';
+  const nm=document.createElement('div');nm.className='thumb-name';nm.textContent=clip.original_name;nm.title=clip.name;
+  const mt=document.createElement('div');mt.className='thumb-meta';mt.textContent=clip.start_tc+' · '+clip.duration_tc;
+  const sel=document.createElement('select');sel.className='thumb-slug';
+  for(const s of (db?.slugs||[])){const o=document.createElement('option');o.value=o.textContent=s.name;sel.appendChild(o)}
+  sel.value=defaultSlug||'';sel.onchange=()=>{const cl=currentScan.clips.find(x=>x.name===clip.name);if(cl)cl.slug=sel.value};
+  f.appendChild(nm);f.appendChild(mt);f.appendChild(sel);c.appendChild(w);c.appendChild(f);g.appendChild(c);
+}
+function cssId(s){return s.replace(/[^A-Za-z0-9_]/g,'_')}
+function clearScan(){currentScan=null;document.getElementById('thumbGrid').innerHTML='';document.getElementById('scanLog').style.display='none';document.getElementById('commitRow').style.display='none'}
+async function commitCard(){
+  if(!currentScan)return;
+  document.getElementById('commitBtn').disabled=true;
+  const sl=document.getElementById('scanLog');sl.style.display='block';
+  const r=await fetch('/api/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+    sessionId:session.id,inputPath:currentScan.cardPath,cam:currentScan.cam,cardNum:currentScan.cardNum,
+    clips:currentScan.clips,slugAssignments:Object.fromEntries(currentScan.clips.map(c=>[c.name,c.slug||document.getElementById('defaultSlug').value]))
+  })});
+  const {jobId,error}=await r.json();
+  if(error){logScan('Error: '+error);document.getElementById('commitBtn').disabled=false;return}
+  const es=new EventSource('/api/events/'+jobId);
+  es.addEventListener('log',e=>logScan(JSON.parse(e.data).message));
+  es.addEventListener('done',async e=>{
+    es.close();document.getElementById('commitBtn').disabled=false;
+    const item={...currentScan};queue.push(item);
+    const r2=await fetch('/api/session/'+session.id);session=await r2.json();
+    renderQueue();clearScan();setStep('scan',true);updateCardNum();showPanel('ingest');
+  });
+  es.addEventListener('failed',e=>{logScan('Error: '+(JSON.parse(e.data).message||'commit failed'));es.close();document.getElementById('commitBtn').disabled=false});
+}
+function renderQueue(){
+  const list=document.getElementById('queueList');list.innerHTML='';
+  if(!queue.length){list.innerHTML='<div class="empty">No cards committed yet.</div>'}
+  for(const it of queue){
+    const el=document.createElement('div');el.className='queue-item';
+    el.innerHTML='<div><div class="qi-title">CAM '+it.cam+' — CARD '+String(it.cardNum).padStart(3,'0')+'</div><div class="qi-meta">'+it.cardPath+' · '+it.clips.length+' clips</div></div>';
+    const st=document.createElement('div');st.className='qstat';st.textContent='queued';st.dataset.q=it.cam+it.cardNum;el.appendChild(st);list.appendChild(el);
+  }
+  document.getElementById('ingestBtn').disabled=queue.length===0;
+}
+async function startIngest(){
+  if(!session||!queue.length)return;
+  document.getElementById('ingestBtn').disabled=true;
+  const il=document.getElementById('ingestLog');il.style.display='block';il.innerHTML='';
+  const r=await fetch('/api/ingest',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sessionId:session.id})});
+  const {jobId,error}=await r.json();
+  if(error){logIngest('Error: '+error);document.getElementById('ingestBtn').disabled=false;return}
+  const es=new EventSource('/api/events/'+jobId);
+  es.addEventListener('log',e=>logIngest(JSON.parse(e.data).message));
+  es.addEventListener('transcode',e=>{const p=JSON.parse(e.data);if(p.status==='started')logIngest('  ['+p.index+'/'+p.total+'] '+p.clip)});
+  es.addEventListener('card-done',e=>{});
+  es.addEventListener('done',e=>{es.close();setStep('ingest',true);renderStories(JSON.parse(e.data));document.getElementById('ingestBtn').disabled=false});
+  es.addEventListener('failed',e=>{logIngest('Error: '+(JSON.parse(e.data).message||'ingest failed'));es.close();document.getElementById('ingestBtn').disabled=false});
+}
+function logIngest(m){const el=document.getElementById('ingestLog');const d=document.createElement('div');d.textContent=m;el.appendChild(d);el.scrollTop=el.scrollHeight}
+function renderStories(result){
+  const el=document.getElementById('storyResults');
+  el.innerHTML='<div style="font-size:13px;font-weight:600;margin:24px 0 10px">Story deliverables</div>';
+  const dl=document.createElement('div');dl.className='downloads';
+  for(const s of (result.stories||[])){
+    for(const [path,label] of [[s.ale_path,'ALE'],[s.fcpxml_path,'FCPXML']]){
+      if(!path)continue;const a=document.createElement('a');a.className='dl-btn';a.href='/api/download?path='+encodeURIComponent(path);
+      a.textContent='↓ '+path.split('/').pop()+' · '+s.clip_count+' clips';dl.appendChild(a);
+    }
+  }
+  el.appendChild(dl);
+}
+function openLb(src,name){document.getElementById('lbImg').src=src;document.getElementById('lbLbl').textContent=name;document.getElementById('lb').classList.add('open')}
+init();
+</script>
+</body>
+</html>

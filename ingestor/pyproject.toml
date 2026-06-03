@@ -1,0 +1,17 @@
+[project]
+name = "postie-ingestor"
+version = "1.0.0"
+description = "Postie Ingestor — camera-card ingest, verified copy, GPU transcode, ALE delivery for Avid/Resolve"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+postie = "postie.__main__:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["postie*"]
