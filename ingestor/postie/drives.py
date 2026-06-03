@@ -152,9 +152,25 @@ def detect() -> dict:
     }
 
 
-def summary() -> str:
+def detect_json(d: Optional[dict] = None) -> dict:
+    """JSON-serialisable detection result for the HTTP API / UI."""
+    d = d or detect()
+    m, p = d["media"], d["project"]
+    return {
+        "avid_path": d["avid_path"],
+        "project_root": d["project_root"],
+        "media": ({"root": str(m.root), "clip_count": m.clip_count,
+                   "gb": round(m.total_bytes / (1024 ** 3), 1)} if m else None),
+        "project": ({"root": str(p.root),
+                     "project_file": str(p.project_file) if p.project_file else None,
+                     "has_attic": p.has_attic} if p else None),
+        "summary": summary(d),
+    }
+
+
+def summary(d: Optional[dict] = None) -> str:
     """One-line human summary for logs / the UI."""
-    d = detect()
+    d = d or detect()
     m, p = d["media"], d["project"]
     media_s = (
         "media={} ({} clips, {:.0f} GB)".format(

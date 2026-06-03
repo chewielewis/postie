@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, parse_qs
 
-from . import gpu, pipeline
+from . import drives, gpu, pipeline
 from .settings import PACKAGE_DIR
 from .supa import Supa
 
@@ -46,6 +46,7 @@ class Server:
         self.jobs: Dict[str, Job] = {}
         self.scans: Dict[str, dict] = {}
         self._allowed_roots: set = set()
+        self.drives = drives.detect_json()  # Avid media/project drives (one sweep)
 
     # -- job helpers ---------------------------------------------------------
 
@@ -89,6 +90,7 @@ class Server:
         httpd = ThreadingHTTPServer(("0.0.0.0", self.port), handler)
         print("\nPostie Ingestor — {}".format(self.show.get("name") or self.show_code))
         print(gpu.summary())
+        print("Drives: {}".format(self.drives.get("summary") or "?"))
         print("http://localhost:{}\n".format(self.port))
         try:
             httpd.serve_forever()
@@ -142,7 +144,7 @@ def _make_handler(srv: Server):
 
             if path == "/api/db":
                 slugs = srv.supa.get_slugs(srv.show["id"])
-                self._json({"slugs": slugs, "gpu": gpu.summary()})
+                self._json({"slugs": slugs, "gpu": gpu.summary(), "drives": srv.drives})
                 return
 
             if path.startswith("/api/session/"):

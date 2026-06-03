@@ -123,6 +123,7 @@ input::placeholder{color:var(--m2)}
     <div id="panel-session" class="panel active">
       <div class="panel-title">Session setup</div>
       <div class="panel-sub">One session per shoot day. Settings persist and are shared across cards.</div>
+      <div id="driveHint" class="hint" style="margin:-18px 0 20px;color:var(--green)"></div>
       <form class="form" id="sessionForm">
         <div class="row">
           <div class="field"><label>Shoot date (MMDD)</label><input name="date" id="dateInput" maxlength="4" placeholder="0603" required></div>
@@ -197,12 +198,21 @@ const queue=[];
 async function init(){
   const r=await fetch('/api/db'); db=await r.json();
   document.getElementById('gpuLine').textContent=db.gpu||'';
+  applyDrives();
   renderSlugs();
   const n=new Date();
   document.getElementById('dateInput').value=String(n.getMonth()+1).padStart(2,'0')+String(n.getDate()).padStart(2,'0');
   const cs=document.getElementById('camSelector');
   cs.innerHTML=['A','B','C','D','E','F'].map(c=>`<button type="button" class="cam-btn" data-cam="${c}" onclick="selectCam('${c}')">${c}</button>`).join('');
   selectCam('A');
+}
+function applyDrives(){
+  const d=db&&db.drives; if(!d)return;
+  const f=document.getElementById('sessionForm');
+  if(d.avid_path&&!f.avid.value) f.avid.value=d.avid_path;
+  if(d.project_root&&!f.output.value) f.output.value=d.project_root.replace(/[\\/]+$/,'')+'\\Ingest';
+  const h=document.getElementById('driveHint');
+  if(h) h.textContent=d.summary?('Detected — '+d.summary):'';
 }
 function setStep(name,done){document.querySelectorAll('.step').forEach(s=>{if(s.dataset.step===name){if(done)s.classList.add('done')}})}
 function showPanel(name){
