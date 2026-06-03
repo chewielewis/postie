@@ -129,6 +129,30 @@ filesystem path. Therefore:
 2. Source the `NEXT_PUBLIC_SUPABASE_ANON_KEY` for client Realtime (dashboard)
    when reaching Phase 4.
 
+## Parked for later — backfill Postie DB from Avid-created media
+Goal: Postie's media DB should reflect **all** material, not just Postie's own
+transcodes — register the existing Avid-created MXF into Supabase. Feasibility
+confirmed: `ffprobe` reads `reel_name` (original TapeID), `timecode`,
+`material_package_name`, `project_name`, duration, etc. straight from the MXF.
+
+Key facts / gotchas:
+- **Avid writes OP-Atom**: each clip = several MXF files (1 video + N audio
+  atoms) sharing one `material_package_name`/`reel_name`. Group atoms by material
+  package — file count ≠ clip count (e.g. `PGHI-E02__bg.1` had 1098 atoms).
+- Source folders are Avid's managed `Avid MediaFiles\MXF\<workspace>.N` (detected
+  as `avid_active` by `drives.detect()`); Postie's own transcodes now live in a
+  separate `Postie.N` folder (`drives.postie_media_dir`).
+- Two decisions before building: (1) how to model session-less media — synthetic
+  "Avid backfill" session vs nullable `card_id`/`slug_id` + a `source`
+  (`avid`|`postie`) column (schema change); (2) slug assignment — leave
+  `UNASSIGNED` and tag in the web app, or infer from `project_name`/folder.
+- Suggested first step: a **read-only** probe+group pass that prints the deduped
+  clip list (counts per camera/date) with zero DB writes.
+
+Note: the Python ingestor is proven end-to-end on real footage — the 0527
+COPAYMENTS shoot (84 clips, 4 cards) ingested clean into `Postie.1` with ALE +
+FCPXML, drives auto-detected (media `Z:` Nexis, project `Y:`).
+
 ## Key files / reference
 - Ingest engine: `ingestor/postie/` (`pipeline`, `server`, `supa`, `media`,
   `copy`, `relay`, `transcode`, `ale`, `gpu`, `timecode`), `ingestor/README.md`.
