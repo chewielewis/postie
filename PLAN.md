@@ -56,11 +56,26 @@ filesystem path. Therefore:
 
 ## Prerequisites (Supabase — controlled by the user / requires the key)
 
+- **API keys use Supabase's new key system, not the legacy JWTs.** Dashboard →
+  Settings → API Keys: **Publishable key** (`sb_publishable_…`, replaces `anon`,
+  browser-safe) and **Secret key** (`sb_secret_…`, replaces `service_role`,
+  server-only). The env var *names* are unchanged — `SUPABASE_SERVICE_ROLE_KEY`
+  holds the `sb_secret_…` value, `NEXT_PUBLIC_SUPABASE_ANON_KEY` holds the
+  `sb_publishable_…` value; the code just forwards the value as the apikey/Bearer.
+  Gotcha: **the secret key is rejected for browser-origin user-agents** (anything
+  sending a `Mozilla/…` UA, e.g. PowerShell `Invoke-RestMethod`) — use curl or the
+  ingestor's stdlib `urllib` (UA `Python-urllib/…`), which are fine.
 - `ingestor/.env` holds `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (gitignored).
-  Use it to apply migrations and to create the web app's `.env.local`. **Do not
-  commit secrets.**
-- The web client-side Realtime also needs `NEXT_PUBLIC_SUPABASE_ANON_KEY` (from
-  the Supabase dashboard) — not currently stored anywhere in the repo.
+  Templates committed: `ingestor/.env.example`, `.env.local.example`. **Do not
+  commit secrets.** Connection verified 2026-06-04 against project
+  `orriipbupxlozsdzoibv` (show PGHI; slugs CLIMATE/COPAYMENTS/HOIHO; 1 session;
+  cards/clips empty).
+- The web client-side Realtime also needs `NEXT_PUBLIC_SUPABASE_ANON_KEY` — the
+  publishable key, now stored in `.env.local` (gitignored).
+- Supabase CLI / direct Postgres connection are **deferred to Phase 3** (not
+  installed). Current phases run entirely over the REST/Realtime API. When schema
+  changes are needed, decide then: dashboard SQL editor vs. `npx supabase`
+  migrations-as-code (needs `supabase login` + the DB password).
 - New schema/Storage to add (write the SQL; user applies it or grants DB access):
   - Storage bucket `previews` (public or signed URLs).
   - `sessions.status` (e.g. `active|complete`) + progress counts
