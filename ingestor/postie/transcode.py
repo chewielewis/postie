@@ -30,8 +30,22 @@ def _source_path(clip: dict) -> Path:
     )
 
 
-def _staging_file(output: Path, name: str) -> Path:
-    d = output / "_staging"
+def _staging_dir(output: str, avid: Optional[str]) -> Path:
+    """Where to write the in-progress transcode.
+
+    Stage on the *same volume* as the final Avid dir so finalising is an atomic
+    same-volume rename — never a cross-drive copy. The staging folder sits at the
+    media drive's root (outside `Avid MediaFiles`) so Avid never indexes a partial
+    file. Falls back to the output dir when no Avid path is set.
+    """
+    if avid:
+        anchor = Path(avid).anchor or avid  # e.g. 'Z:\\'
+        return Path(anchor) / "_postie_staging"
+    return Path(output) / "_staging"
+
+
+def _staging_file(output: str, avid: Optional[str], name: str) -> Path:
+    d = _staging_dir(output, avid)
     d.mkdir(parents=True, exist_ok=True)
     return d / "{}.mxf".format(name)
 
@@ -52,7 +66,7 @@ def _move_to_avid(staged: Path, name: str, avid: Optional[str], emit: Emit) -> s
         avid_dir = Path(avid)
         avid_dir.mkdir(parents=True, exist_ok=True)
         dest = avid_dir / "{}.mxf".format(name)
-        staged.replace(dest)
+        staged.replace(dest)  # atomic rename — staging is on the same volume
         if emit:
             emit("log", {"message": "  {} -> AvidMediaFiles".format(name)})
         return str(dest)
@@ -62,8 +76,7 @@ def _move_to_avid(staged: Path, name: str, avid: Optional[str], emit: Emit) -> s
 def transcode_clip(clip: dict, *, output: str, avid: Optional[str],
                    log_preset: Optional[str], emit: Emit = None) -> str:
     """Transcode a single clip to DNxHR LB. Returns the final proxy path."""
-    out_root = Path(output)
-    staged = _staging_file(out_root, clip["name"])
+    staged = _staging_file(output, avid, clip["name"])
     if staged.exists() and staged.stat().st_size > 0:
         if emit:
             emit("log", {"message": "  {} already staged, skipping".format(clip["name"])})
@@ -106,8 +119,7 @@ def transcode_relay_group(parts: List[dict], *, output: str, avid: Optional[str]
                           log_preset: Optional[str], emit: Emit = None) -> str:
     """Concat N relay parts into one DNxHR LB proxy, named after part 1."""
     part1 = parts[0]
-    out_root = Path(output)
-    staged = _staging_file(out_root, part1["name"])
+    staged = _staging_file(output, avid, part1["name"])
     if staged.exists() and staged.stat().st_size > 0:
         if emit:
             emit("log", {"message": "  {} relay already staged".format(part1["name"])})
