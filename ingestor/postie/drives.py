@@ -68,6 +68,61 @@ def find_media_drive(roots: Optional[List[Path]] = None) -> Optional[MediaDrive]
     return best
 
 
+_POSTIE_PREFIX = "Postie."
+
+
+def postie_media_dir(mxf_dir: Path) -> Path:
+    """Postie's own MXF subfolder for transcodes.
+
+    Avid only indexes media inside MXF subfolders, never the MXF root — so Postie
+    writes into its own ``Postie.N`` folder (Avid's ``.N`` convention) kept
+    separate from Avid's managed workspace folders. Avid still scans and indexes
+    it on launch. Reuses the latest existing ``Postie.N``, else ``Postie.1``.
+    """
+    existing = []
+    try:
+        for d in mxf_dir.iterdir():
+            if d.is_dir() and d.name.lower().startswith(_POSTIE_PREFIX.lower()):
+                existing.append(d)
+    except OSError:
+        pass
+
+    def _suffix_num(p: Path) -> int:
+        try:
+            return int(p.name.rsplit(".", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    return max(existing, key=_suffix_num) if existing else mxf_dir / (_POSTIE_PREFIX + "1")
+
+
+def active_media_subfolder(mxf_dir: Path) -> Optional[Path]:
+    """The MXF subfolder Avid is actively indexing.
+
+    Avid stores media in numbered/workspace subfolders (e.g. ``PGHI-E02.1``),
+    each with its own ``msmMMOB.mdb`` + ``msmFMID.pmr`` database. Loose files in
+    the MXF root are NOT indexed. Pick the subfolder whose database was touched
+    most recently — that's the volume's current write target. (Used for context
+    and for backfilling Postie's DB from Avid-created media.)
+    """
+    best = None  # (Path, mtime)
+    try:
+        subs = [d for d in mxf_dir.iterdir() if d.is_dir()]
+    except OSError:
+        return None
+    for sub in subs:
+        mts = []
+        for db in (sub / "msmFMID.pmr", sub / "msmMMOB.mdb"):
+            try:
+                if db.exists():
+                    mts.append(db.stat().st_mtime)
+            except OSError:
+                pass
+        if mts and (best is None or max(mts) > best[1]):
+            best = (sub, max(mts))
+    return best[0] if best else None
+
+
 _AVP_MAX_DEPTH = 2  # active projects are shallow; deep .avp are archives
 
 
@@ -144,10 +199,17 @@ def detect() -> dict:
     roots = volumes()
     media = find_media_drive(roots)
     project = find_project_drive(roots)
+    avid_path = avid_active = None
+    if media:
+        # Postie transcodes go to its own folder, kept separate from Avid's.
+        avid_path = str(postie_media_dir(media.mxf_dir))
+        sub = active_media_subfolder(media.mxf_dir)
+        avid_active = str(sub) if sub else None
     return {
         "media": media,
         "project": project,
-        "avid_path": str(media.mxf_dir) if media else None,
+        "avid_path": avid_path,
+        "avid_active": avid_active,
         "project_root": str(project.root) if project else None,
     }
 
