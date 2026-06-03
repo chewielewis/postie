@@ -11,12 +11,26 @@ and end TC of the whole span.
 from pathlib import Path
 from typing import List
 
+from . import media
 from .settings import CAM_COLORS
 from .timecode import tc_end, frames_to_tc
 
 
 def cam_color(cam: str) -> str:
     return CAM_COLORS.get((cam or "").upper(), "White")
+
+
+def _clip_audio(clip: dict) -> tuple:
+    """(track_count, channels) for a clip, from its transcoded proxy (or source)."""
+    src = clip.get("proxy_path") or clip.get("file_path")
+    return media.audio_layout(Path(src)) if src else (0, 0)
+
+
+def _tracks_field(track_count: int) -> str:
+    """Avid 'Tracks' notation: V plus one A-slot per audio track (VA1A2…)."""
+    if track_count <= 0:
+        return "V"
+    return "V" + "".join("A{}".format(i) for i in range(1, track_count + 1))
 
 
 def _xml_escape(s) -> str:
@@ -57,11 +71,12 @@ def build_ale(clips: List[dict], fps, slug: str, date: str) -> str:
         if (clip.get("relay_part") or 0) > 1:
             continue
         start, end, duration = _resolved_tc(clip, fps)
+        tracks, _ = _clip_audio(clip)
         lines.append("\t".join([
             clip["name"],
             clip.get("tape") or clip["name"],
             start, end, duration,
-            "VA1A2",
+            _tracks_field(tracks),
             str(clip.get("fps") or fps),
             cam_color(clip.get("cam")),
             slug,
@@ -102,11 +117,13 @@ def build_fcpxml(clips: List[dict], fps, slug: str, date: str, output_root: str)
         dur_str = "{}/{}s".format(dur_frames, nf)
         src = _xml_escape(clip.get("proxy_path") or clip.get("file_path") or "")
         rid = "r{}".format(i + 2)
+        _, a_chans = _clip_audio(clip)
+        has_audio = "1" if a_chans > 0 else "0"
         relay_md = ('\n        <md key="com.postie.relayGroup" value="{}"/>'.format(clip["relay_group"])
                     if clip.get("relay_group") else "")
         assets.append(
             '    <asset id="{rid}" name="{name}" start="0s" duration="{dur}" '
-            'hasVideo="1" hasAudio="1" audioSources="1" audioChannels="2" audioRate="48000">\n'
+            'hasVideo="1" hasAudio="{hasa}" audioSources="1" audioChannels="{achans}" audioRate="48000">\n'
             '      <media-rep kind="original-media" src="file://{src}"/>\n'
             '      <metadata>\n'
             '        <md key="com.apple.proapps.studio.reel" value="{reel}"/>\n'
@@ -117,6 +134,7 @@ def build_fcpxml(clips: List[dict], fps, slug: str, date: str, output_root: str)
             '      </metadata>\n'
             '    </asset>'.format(
                 rid=rid, name=_xml_escape(clip["name"]), dur=dur_str, src=src,
+                hasa=has_audio, achans=a_chans,
                 reel=_xml_escape(clip.get("tape") or clip["name"]),
                 cam=(clip.get("cam") or "").upper(), slug=_xml_escape(slug),
                 date=date, stc=clip.get("start_tc") or "00:00:00:00", relay=relay_md,

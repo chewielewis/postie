@@ -42,6 +42,16 @@ def probe(path: Path) -> Optional[dict]:
         return None
 
 
+def audio_layout(path: Path) -> tuple:
+    """(audio_track_count, total_channels) for a media file, via ffprobe."""
+    info = probe(path)
+    if not info:
+        return (0, 0)
+    streams = [s for s in info.get("streams", []) if s.get("codec_type") == "audio"]
+    channels = sum(int(s.get("channels") or 0) for s in streams)
+    return (len(streams), channels)
+
+
 def sony_creation_time(path: Path) -> Optional[str]:
     """Read CreationDate from a Sony NRT XML sidecar, if present."""
     base = path.stem

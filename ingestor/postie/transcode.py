@@ -87,37 +87,35 @@ def transcode_clip(clip: dict, *, output: str, avid: Optional[str],
     if emit:
         emit("log", {"message": "  transcoding {}...".format(clip["name"])})
 
-    args = gpu.hwaccel_decode_flags() + ["-i", str(src)]
-    vf = lut3d_filter(lut)
-    if vf:
-        args += ["-vf", vf]
-    args += [
+    # Map the video + EVERY audio track. ffmpeg's default keeps only one audio
+    # stream; cameras carry 1/2/4/8 (Sony A-cam = 8 mono mics), all of which must
+    # survive into the Avid media. `0:a?` is optional so silent clips don't fail.
+    enc = [
+        "-map", "0:v:0", "-map", "0:a?",
         "-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p",
         "-c:a", "pcm_s16le", "-ar", "48000",
         "-timecode", clip.get("start_tc") or "00:00:00:00",
         "-y", str(staged),
     ]
+    vf = lut3d_filter(lut)
+    vf_args = ["-vf", vf] if vf else []
     try:
-        _run_ffmpeg(args)
+        _run_ffmpeg(gpu.hwaccel_decode_flags() + ["-i", str(src)] + vf_args + enc)
     except RuntimeError:
         # Retry without hwaccel for decoders that choke on it.
-        args2 = ["-i", str(src)]
-        if vf:
-            args2 += ["-vf", vf]
-        args2 += [
-            "-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p",
-            "-c:a", "pcm_s16le", "-ar", "48000",
-            "-timecode", clip.get("start_tc") or "00:00:00:00",
-            "-y", str(staged),
-        ]
-        _run_ffmpeg(args2)
+        _run_ffmpeg(["-i", str(src)] + vf_args + enc)
 
     return _move_to_avid(staged, clip["name"], avid, emit)
 
 
 def transcode_relay_group(parts: List[dict], *, output: str, avid: Optional[str],
                           log_preset: Optional[str], emit: Emit = None) -> str:
-    """Concat N relay parts into one DNxHR LB proxy, named after part 1."""
+    """Concat N relay parts into one DNxHR LB proxy, named after part 1.
+
+    NOTE: the concat filtergraph below carries a single audio track per part.
+    Multi-track audio across a relay span is not yet preserved (no relays in the
+    current footage); single clips keep all tracks via transcode_clip.
+    """
     part1 = parts[0]
     staged = _staging_file(output, avid, part1["name"])
     if staged.exists() and staged.stat().st_size > 0:
