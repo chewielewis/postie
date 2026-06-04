@@ -108,6 +108,10 @@ filesystem path. Therefore:
 ### Phase 4 — Live ingest dashboard
 - `/[show]` dashboard: in-progress sessions with per-clip/card progress (Realtime
   or polling), recent sessions, overall counts (clips, stories, cards).
+- Decided: a terminal monitor (`python -m postie --show PGHI --status [--watch]`,
+  `postie/status.py`) covers monitoring **now**; the web dashboard is deliberately
+  deferred until the ingest workflow itself is solid. Both read the same Supabase
+  clip status, so they stay consistent.
 
 ### Phase 5 — Navigation shell + utilities
 - Consistent show layout: persistent nav (Dashboard · Library · Sessions ·
