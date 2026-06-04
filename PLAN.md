@@ -25,6 +25,21 @@ Two paths: (A) cheap test — make ffmpeg OP-Atom atoms (TC only) and scan in Av
 to see how far it gets (scan ok? TC relink?); (B) adopt raw2bmx as the wrapper
 stage. Likely B for a real relink.
 
+**RESULT of path A (tested live in Avid, 2026-06-04):** OP-Atom atoms in
+`PGHI-E02.5` SCAN fine (no "invalid MXF") and the ALE master clip imports with
+the correct track layout (e.g. 4 tracks for B-cam) — but **media stays OFFLINE**;
+no tape name → Avid can't relink, timecode alone doesn't bridge it. **Decision:
+go path B (raw2bmx).** ffmpeg-only is confirmed insufficient.
+
+### Next session: build the raw2bmx wrapper stage
+1. Get `raw2bmx` (bmxlib) onto the Windows box — no winget pkg; needs a prebuilt
+   binary or a vcpkg/CMake+MSVC build of github.com/bbc/bmx.
+2. New transcode flow: ffmpeg encodes DNxHR → `.dnxhd` elementary + per-track
+   `.wav` (lossless, same copy/byte-swap rules); then `raw2bmx --clip-name <clip>
+   --tape-name <reel> -t avid -o <dir> --dnxhd ... <wavs>` → grouped Avid OP-Atom.
+3. Folder `<COMPUTERNAME>.N` (PGHI-E02.N). Re-test relink in Avid.
+Scratch test ALE: `Y:\Ingest\0527_COPAYMENTS_OPATOM_TEST.ale` (2 clips).
+
 Fix path (verified ffmpeg can do it; needs building + an Avid relink test):
 - Use `-f mxf_opatom`. OP-Atom = **one essence per file**: 1 video MXF + **one
   MXF per audio track** (A-cam → 1 + 8 = 9 files per clip). A 2-sec test wrote
