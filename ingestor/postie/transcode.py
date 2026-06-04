@@ -13,7 +13,7 @@ import subprocess
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from . import gpu
+from . import gpu, media
 from .luts import resolve_lut, lut3d_filter
 
 Emit = Optional[Callable[[str, dict], None]]
@@ -112,9 +112,9 @@ def transcode_relay_group(parts: List[dict], *, output: str, avid: Optional[str]
                           log_preset: Optional[str], emit: Emit = None) -> str:
     """Concat N relay parts into one DNxHR LB proxy, named after part 1.
 
-    NOTE: the concat filtergraph below carries a single audio track per part.
-    Multi-track audio across a relay span is not yet preserved (no relays in the
-    current footage); single clips keep all tracks via transcode_clip.
+    All audio tracks are carried through the concat. A relay group is one camera
+    (A- or B-cam) so every part shares the same layout (8 or 4 mono tracks);
+    the track count is read from part 1.
     """
     part1 = parts[0]
     staged = _staging_file(output, avid, part1["name"])
@@ -126,20 +126,31 @@ def transcode_relay_group(parts: List[dict], *, output: str, avid: Optional[str]
     srcs = [_source_path(p) for p in parts]
     lut = resolve_lut(log_preset)
     n = len(srcs)
+    a_tracks, _ = media.audio_layout(srcs[0])
     if emit:
-        emit("log", {"message": "  relay transcode {} ({} parts)...".format(part1["name"], n)})
+        emit("log", {"message": "  relay transcode {} ({} parts, {} audio)...".format(
+            part1["name"], n, a_tracks)})
 
-    concat_in = "".join("[{0}:v][{0}:a]".format(i) for i in range(n))
-    filter_str = "{}concat=n={}:v=1:a=1[v][a]".format(concat_in, n)
+    # concat wants, per segment, the video then each audio track in order:
+    #   [0:v][0:a:0]..[0:a:K-1][1:v][1:a:0].. -> concat=n=N:v=1:a=K[v][a0]..[aK-1]
+    concat_in = "".join(
+        "[{0}:v]".format(i) + "".join("[{0}:a:{1}]".format(i, k) for k in range(a_tracks))
+        for i in range(n)
+    )
+    audio_outs = "".join("[a{}]".format(k) for k in range(a_tracks))
+    filter_str = "{}concat=n={}:v=1:a={}[v]{}".format(concat_in, n, a_tracks, audio_outs)
     vf = lut3d_filter(lut)
     if vf:
-        filter_str = filter_str.replace("[v][a]", "[vc][a];[vc]{}[v]".format(vf))
+        filter_str = filter_str.replace(
+            "[v]{}".format(audio_outs), "[vc]{};[vc]{}[v]".format(audio_outs, vf))
 
     args: List[str] = []
     for s in srcs:
         args += ["-i", str(s)]
+    args += ["-filter_complex", filter_str, "-map", "[v]"]
+    for k in range(a_tracks):
+        args += ["-map", "[a{}]".format(k)]
     args += [
-        "-filter_complex", filter_str, "-map", "[v]", "-map", "[a]",
         "-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p",
         "-c:a", "pcm_s16le", "-ar", "48000",
         "-timecode", part1.get("start_tc") or "00:00:00:00",
