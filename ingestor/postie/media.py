@@ -52,6 +52,32 @@ def audio_layout(path: Path) -> tuple:
     return (len(streams), channels)
 
 
+# Little-endian PCM flavours that drop straight into MXF with a stream copy.
+_LE_PCM = {"pcm_s16le", "pcm_s24le", "pcm_s32le", "pcm_u8", "pcm_f32le", "pcm_f64le"}
+
+
+def audio_codec_args(path: Path) -> List[str]:
+    """ffmpeg `-c:a` args that move audio into MXF without quality loss.
+
+    Audio is never re-sampled or bit-depth-reduced:
+      * little-endian PCM (e.g. Sony A-cam pcm_s24le) → stream copy, bit-exact;
+      * big-endian PCM (MP4 cams, pcm_sNNbe) → byte-swap to pcm_sNNle (MXF can't
+        hold big-endian PCM) — same samples, same bit depth;
+      * anything non-PCM → pcm_s24le as a high-quality last resort.
+    """
+    info = probe(path)
+    streams = [s for s in (info or {}).get("streams", []) if s.get("codec_type") == "audio"]
+    if not streams:
+        return ["-c:a", "copy"]
+    codec = (streams[0].get("codec_name") or "").lower()
+    if codec in _LE_PCM:
+        return ["-c:a", "copy"]
+    m = re.match(r"pcm_s(\d+)be$", codec)
+    if m:
+        return ["-c:a", "pcm_s{}le".format(m.group(1))]
+    return ["-c:a", "pcm_s24le"]
+
+
 def sony_creation_time(path: Path) -> Optional[str]:
     """Read CreationDate from a Sony NRT XML sidecar, if present."""
     base = path.stem

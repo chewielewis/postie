@@ -89,11 +89,13 @@ def transcode_clip(clip: dict, *, output: str, avid: Optional[str],
 
     # Map the video + EVERY audio track. ffmpeg's default keeps only one audio
     # stream; cameras carry 1/2/4/8 (Sony A-cam = 8 mono mics), all of which must
-    # survive into the Avid media. `0:a?` is optional so silent clips don't fail.
+    # survive. `0:a?` is optional so silent clips don't fail. Audio is copied
+    # 1:1 when the container allows, else byte-swapped losslessly — never
+    # resampled or bit-reduced (see media.audio_codec_args).
     enc = [
         "-map", "0:v:0", "-map", "0:a?",
         "-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p",
-        "-c:a", "pcm_s16le", "-ar", "48000",
+        *media.audio_codec_args(src),
         "-timecode", clip.get("start_tc") or "00:00:00:00",
         "-y", str(staged),
     ]
@@ -152,7 +154,9 @@ def transcode_relay_group(parts: List[dict], *, output: str, avid: Optional[str]
         args += ["-map", "[a{}]".format(k)]
     args += [
         "-c:v", "dnxhd", "-profile:v", "dnxhr_lb", "-pix_fmt", "yuv422p",
-        "-c:a", "pcm_s16le", "-ar", "48000",
+        # Concat runs audio through the filtergraph, so it can't be stream-copied;
+        # keep 24-bit LE PCM (relay parts are A-/B-cam, both 24-bit) — lossless.
+        "-c:a", "pcm_s24le",
         "-timecode", part1.get("start_tc") or "00:00:00:00",
         "-y", str(staged),
     ]
