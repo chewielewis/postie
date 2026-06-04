@@ -11,6 +11,20 @@ default `mxf` muxer writes **OP1a** (one interleaved file, no
 `operational_pattern_ul`), while Avid Media Composer only indexes **OP-Atom**
 (`operational_pattern_ul=...10030000`). DNxHR/PCM data is fine — wrong container.
 
+**Findings 2026-06-04 (research done):** ffmpeg's `mxf_opatom` writes a valid
+OP-Atom container (`...10030000`, Avid scans it) and sets timecode, BUT cannot
+set the `material_package_name`/reel/tape — the muxer exposes no such option and
+`-metadata reel_name`/`material_package_name` are ignored at format AND stream
+level. So Avid can't relink the ALE by TapeID with pure ffmpeg. The right tool is
+**bmx `raw2bmx`** (bmxlib) — wraps a DNxHR elementary stream + WAV/PCM into Avid
+OP-Atom with `--clip-name`, `--tape-name`, and groups V+A into one master clip.
+Not installed; no winget package (the "BMX" winget hit is Desire2Learn). Needs a
+prebuilt Windows binary or a CMake/MSVC build of bmxlib.
+
+Two paths: (A) cheap test — make ffmpeg OP-Atom atoms (TC only) and scan in Avid
+to see how far it gets (scan ok? TC relink?); (B) adopt raw2bmx as the wrapper
+stage. Likely B for a real relink.
+
 Fix path (verified ffmpeg can do it; needs building + an Avid relink test):
 - Use `-f mxf_opatom`. OP-Atom = **one essence per file**: 1 video MXF + **one
   MXF per audio track** (A-cam → 1 + 8 = 9 files per clip). A 2-sec test wrote
