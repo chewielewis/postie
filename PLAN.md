@@ -3,7 +3,50 @@
 > Status: **ingest engine rebuilt in Python** (`ingestor/`, on `main`). Web
 > dashboard not started — pick up at Phase 1. Last revised 2026-06-04.
 
-## ⛔ BLOCKER: Avid needs OP-Atom MXF, we write OP1a
+## ⏳ AWAITING AVID RELINK TEST: raw2bmx OP-Atom, DNxHD (2026-06-04)
+
+Research + a real test clip done this session. **bmx `raw2bmx` writes a
+relink-ready Avid OP-Atom and sets all three fields ffmpeg couldn't**
+(material_package_name, tape, V+A grouping). Decisions made:
+
+- **Install solved — no build.** BBC ships a prebuilt Windows binary,
+  `bmx-win64-binary-1.6.zip`, unpacked at
+  `tools/bmx/1.6/bmx-win64-binary-1.6/bin/` (raw2bmx, bmxtranswrap, mxf2raw).
+  The PLAN's "needs a vcpkg/CMake+MSVC build" assumption was wrong.
+- **CRITICAL: bmx 1.6 supports DNxHD (VC-3) only, NOT DNxHR.** Proven 3 ways:
+  bmxtranswrap dropped the DNxHR video ("unknown essence type"); raw2bmx --vc3
+  errored in VC3EssenceParser (DNxHR frame-header byte 0x03, parser wants
+  0x01/0x02); the compression-ID table holds only 1235–1260 (all DNxHD). Forum
+  "DNxHR works" claims are unmerged forks, reportedly "Unsupported" in Avid.
+- **Decision: switch Postie's proxy codec DNxHR LB → DNxHD 36** (CID 1253,
+  1080p ~36Mbps — the classic Avid offline proxy). 0527 footage is **1080p25**
+  (per ALE: VIDEO_FORMAT 1080 / FPS 25) so no downscale; general code must still
+  guard non-1080/non-25 since DNxHD is HD-only at fixed rates.
+- **Real test clip STAGED, awaiting a live Avid relink test.** Built
+  `0527_COPAYMENTS_CAMA_CARD001_A096C002_260527FK` (re-encoded its quarantined
+  DNxHR proxy → DNxHD 36 + 8 WAVs → raw2bmx) into
+  `Z:\Avid MediaFiles\MXF\PGHI-E02.6`. ffprobe/mxf2raw confirm opatom UL
+  `...10030000`, material_package_name = clip name, tape = clip name @ TC
+  03:05:29:09, grouped V+A1..A8. **Next: scan/relink in Avid against
+  `Y:\Ingest\0527_COPAYMENTS.ale` (Tape=A096C002) — does the master clip come
+  ONLINE?** If yes, wire raw2bmx into the pipeline (below). If no, diagnose what
+  else Avid wants before touching transcode.py.
+
+Working recipe (flags are `--clip`/`--tape`, NOT `--clip-name`):
+`ffmpeg -i src -map 0:v:0 -c:v dnxhd -b:v 36M -pix_fmt yuv422p -r 25 v.dnxhd`;
+per track `ffmpeg -i src -map 0:a:K -c copy aN.wav`; then
+`raw2bmx -t avid -o <dir>\<clip> --clip <clip> --tape <clip> -y <tc> -f 25 --vc3 v.dnxhd --wave a1.wav … --wave aN.wav`.
+
+### Pipeline wiring (after the Avid relink test passes)
+Rework `transcode.py` (`transcode_clip` + `transcode_relay_group`): encode DNxHD
+elementary + per-track WAVs into staging, run raw2bmx into the
+`PGHI-E02.N` Avid folder (atoms `<clip>_v1` + `<clip>_a1..aN`), then move/finalise
+all atoms together. Carry over audio copy/byte-swap rules (now → WAV), TC, LUT,
+relay concat, and the per-clip checkpoints. `--tape`/`--clip` = clip name.
+
+---
+
+## (resolved) Avid needs OP-Atom MXF, we write OP1a
 
 Confirmed against a live Avid Media Composer scan of the 0527 COPAYMENTS media:
 Avid rejects our clips ("not a valid/supported MXF File") because ffmpeg's
