@@ -3,6 +3,33 @@
 > Status: **ingest engine rebuilt in Python** (`ingestor/`, on `main`). Web
 > dashboard not started — pick up at Phase 1. Last revised 2026-06-04.
 
+## ⛔ BLOCKER: Avid needs OP-Atom MXF, we write OP1a
+
+Confirmed against a live Avid Media Composer scan of the 0527 COPAYMENTS media:
+Avid rejects our clips ("not a valid/supported MXF File") because ffmpeg's
+default `mxf` muxer writes **OP1a** (one interleaved file, no
+`operational_pattern_ul`), while Avid Media Composer only indexes **OP-Atom**
+(`operational_pattern_ul=...10030000`). DNxHR/PCM data is fine — wrong container.
+
+Fix path (verified ffmpeg can do it; needs building + an Avid relink test):
+- Use `-f mxf_opatom`. OP-Atom = **one essence per file**: 1 video MXF + **one
+  MXF per audio track** (A-cam → 1 + 8 = 9 files per clip). A 2-sec test wrote
+  `...10030000`, matching Avid.
+- **Open problem:** Avid groups the video + audio atoms into a single master clip
+  via a shared SourcePackage/MobID. Separate ffmpeg runs may emit independent
+  MobIDs → Avid won't pair them. Research how to make the atoms share package
+  metadata (or how Avid relinks OP-Atom: reel/TapeID + TC + track), then verify a
+  real relink in Avid.
+- **Media folder convention is `<COMPUTERNAME>.<n>`** (machine = `PGHI-E02`, so
+  `PGHI-E02.N`), NOT `Postie.1`. `drives.postie_media_dir` must target the
+  computer-name folder. Avid increments `.N` as folders fill.
+- Audio handling (copy/byte-swap, all tracks) and ALE/FCPXML track counts are
+  already correct and carry over.
+
+Also (smaller): `pipeline.run_ingest` swallows per-clip transcode failures — a
+failed clip stays at its old proxy with status unchanged. Mark it `failed` so
+`--status` surfaces it.
+
 ## What Postie is
 
 A system for **assistant editors** that processes, transcodes, and moves shot
