@@ -31,6 +31,17 @@ the correct track layout (e.g. 4 tracks for B-cam) — but **media stays OFFLINE
 no tape name → Avid can't relink, timecode alone doesn't bridge it. **Decision:
 go path B (raw2bmx).** ffmpeg-only is confirmed insufficient.
 
+**PROOF from an Avid bin export (`X:\PGHI_2026 Bin2.ALE`, 2026-06-04):** the
+OP-Atom atoms scan fine (DNxHR LB, correct TC, on Z:) but come in **nameless**
+(`Name=msmMMOB.NN`, i.e. blank material_package_name), **tapeless** (empty Tape
+column), and **ungrouped** (12 separate single-track clips, not one V+A1..A8).
+The ALE master clips (Tape=A096, correct TC) stay offline because the media has
+no tape to match. So the media needs three fields ffmpeg's mxf_opatom WON'T
+write: `material_package_name` (=clip name), a tape/reel, and a shared package to
+group V+A. The earlier "ffmpeg worked" recipe is unrecoverable (user doesn't have
+it; my -metadata/muxer-option tests all failed). **Conclusion: use raw2bmx** — it
+sets `--clip-name`, `--tape-name`, and groups the atoms. Standby lifted.
+
 ### Next session: build the raw2bmx wrapper stage
 1. Get `raw2bmx` (bmxlib) onto the Windows box — no winget pkg; needs a prebuilt
    binary or a vcpkg/CMake+MSVC build of github.com/bbc/bmx.
