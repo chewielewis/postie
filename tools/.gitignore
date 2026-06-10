@@ -1,0 +1,7 @@
+# Generated test artifacts — large MXF/WAV/elementary, do not commit
+bmx/_test/
+bmx/_realtest/
+bmx/_realtest2/
+# Keep the unpacked binary tree, not the distribution zip
+bmx/*.zip
+bmx/**/*.zip

@@ -1,48 +1,69 @@
 # Postie — Plan
 
 > Status: **ingest engine rebuilt in Python** (`ingestor/`, on `main`). Web
-> dashboard not started — pick up at Phase 1. Last revised 2026-06-04.
+> dashboard not started — pick up at Phase 1. Last revised 2026-06-11.
 
-## ⏳ AWAITING AVID RELINK TEST: raw2bmx OP-Atom, DNxHD (2026-06-04)
+## ✅ SOLVED (path proven in Avid): raw2bmx DNxHD OP-Atom + embedded tags
 
-Research + a real test clip done this session. **bmx `raw2bmx` writes a
-relink-ready Avid OP-Atom and sets all three fields ffmpeg couldn't**
-(material_package_name, tape, V+A grouping). Decisions made:
+raw2bmx produces Avid OP-Atom media that **comes ONLINE in Avid and plays** —
+the OP-Atom blocker is solved. The remaining design change is to drop the ALE as
+the Avid relink vehicle and instead **embed the AE metadata directly in the MXF**
+so clips self-populate with no relink. Findings this session, in order:
 
 - **Install solved — no build.** BBC ships a prebuilt Windows binary,
-  `bmx-win64-binary-1.6.zip`, unpacked at
-  `tools/bmx/1.6/bmx-win64-binary-1.6/bin/` (raw2bmx, bmxtranswrap, mxf2raw).
-  The PLAN's "needs a vcpkg/CMake+MSVC build" assumption was wrong.
+  `bmx-win64-binary-1.6.zip` (github.com/bbc/bmx releases v1.6), unpacked +
+  committed at `tools/bmx/1.6/bmx-win64-binary-1.6/bin/` (raw2bmx, bmxtranswrap,
+  mxf2raw). Needs MSVC redistributable. The "vcpkg/CMake+MSVC build" assumption
+  was wrong.
 - **CRITICAL: bmx 1.6 supports DNxHD (VC-3) only, NOT DNxHR.** Proven 3 ways:
   bmxtranswrap dropped the DNxHR video ("unknown essence type"); raw2bmx --vc3
   errored in VC3EssenceParser (DNxHR frame-header byte 0x03, parser wants
-  0x01/0x02); the compression-ID table holds only 1235–1260 (all DNxHD). Forum
-  "DNxHR works" claims are unmerged forks, reportedly "Unsupported" in Avid.
-- **Decision: switch Postie's proxy codec DNxHR LB → DNxHD 36** (CID 1253,
-  1080p ~36Mbps — the classic Avid offline proxy). 0527 footage is **1080p25**
-  (per ALE: VIDEO_FORMAT 1080 / FPS 25) so no downscale; general code must still
-  guard non-1080/non-25 since DNxHD is HD-only at fixed rates.
-- **Real test clip STAGED, awaiting a live Avid relink test.** Built
+  0x01/0x02); the compression-ID table holds only 1235–1260 (all DNxHD). So
+  **Postie's proxy codec must change DNxHR LB → DNxHD 36** (CID 1253, 1080p
+  ~36Mbps — the classic Avid offline proxy). 0527 footage is 1080p25 (ALE:
+  VIDEO_FORMAT 1080 / FPS 25) so no downscale; general code must still guard
+  non-1080/non-25 since DNxHD is HD-only at fixed rates.
+- **Media verified ONLINE in Avid.** Built real clip
   `0527_COPAYMENTS_CAMA_CARD001_A096C002_260527FK` (re-encoded its quarantined
-  DNxHR proxy → DNxHD 36 + 8 WAVs → raw2bmx) into
-  `Z:\Avid MediaFiles\MXF\PGHI-E02.6`. ffprobe/mxf2raw confirm opatom UL
-  `...10030000`, material_package_name = clip name, tape = clip name @ TC
-  03:05:29:09, grouped V+A1..A8. **Next: scan/relink in Avid against
-  `Y:\Ingest\0527_COPAYMENTS.ale` (Tape=A096C002) — does the master clip come
-  ONLINE?** If yes, wire raw2bmx into the pipeline (below). If no, diagnose what
-  else Avid wants before touching transcode.py.
+  DNxHR proxy → DNxHD 36 + 8 WAVs → raw2bmx) into `Z:\…\MXF\PGHI-E02.6`. Avid
+  scanned it (wrote msmMMOB.mdb) and **dragging in the msmMMOB plays + links
+  fine.** Atoms share one MaterialPackage + PhysicalSourcePackage UMID (correct
+  V+A grouping); opatom UL `...10030000`; tape = clip name @ TC 03:05:29:09. The
+  media is structurally identical to Avid's own OP-Atom (same track_number ULs,
+  descriptor).
+- **ALE auto-relink does NOT work — and that path is rejected.** Importing the
+  ALE makes offline master clips that do not auto-link to the media; only a
+  *manual* Clip→Relink would bind them, and **the user requires it to be
+  automatic** (manual per-session relink is unacceptable). So the ALE is dropped
+  as the Avid online vehicle.
+- **THE AUTOMATIC SOLUTION: embed metadata in the MXF via raw2bmx `--tag`.**
+  raw2bmx avid options: `--tag <name> <value>` (repeatable) adds a named Avid
+  user-comment **column** to the MaterialPackage; `--comment <str>` →
+  'Comments'; `--desc <str>` → 'Descript'; `--project <name>`; `--locator`.
+  Rebuilt C002 into `Z:\…\MXF\PGHI-E02.7` with `--tag Slug COPAYMENTS --tag
+  Shoot_Day 0527 --tag Camera A --tag Color Cyan --comment "…" --project PGHI`;
+  confirmed the strings are written into the MXF (UTF-16). When Avid scans the
+  folder the clip comes online **already carrying its columns — no ALE, no
+  relink.** ⏳ Pending: user confirms the columns show in the Avid bin (use
+  Bin→Choose Columns to reveal custom user columns the first time).
+  Caveat: `--tag Color Cyan` makes a *column* "Color"="Cyan"; it does NOT set
+  Avid's colored-label dot (separate attribute bmx can't write) — drop or keep
+  as a plain column.
 
 Working recipe (flags are `--clip`/`--tape`, NOT `--clip-name`):
 `ffmpeg -i src -map 0:v:0 -c:v dnxhd -b:v 36M -pix_fmt yuv422p -r 25 v.dnxhd`;
 per track `ffmpeg -i src -map 0:a:K -c copy aN.wav`; then
-`raw2bmx -t avid -o <dir>\<clip> --clip <clip> --tape <clip> -y <tc> -f 25 --vc3 v.dnxhd --wave a1.wav … --wave aN.wav`.
+`raw2bmx -t avid -o <dir>\<clip> --clip <clip> --tape <clip> -y <tc> -f 25 --project <show> --tag Slug <slug> --tag Camera <cam> … --vc3 v.dnxhd --wave a1.wav … --wave aN.wav`.
 
-### Pipeline wiring (after the Avid relink test passes)
+### Pipeline wiring (next implementation step)
 Rework `transcode.py` (`transcode_clip` + `transcode_relay_group`): encode DNxHD
-elementary + per-track WAVs into staging, run raw2bmx into the
-`PGHI-E02.N` Avid folder (atoms `<clip>_v1` + `<clip>_a1..aN`), then move/finalise
-all atoms together. Carry over audio copy/byte-swap rules (now → WAV), TC, LUT,
-relay concat, and the per-clip checkpoints. `--tape`/`--clip` = clip name.
+elementary + per-track WAVs into staging, run raw2bmx into the `PGHI-E02.N` Avid
+folder (atoms `<clip>_v1` + `<clip>_a1..aN`), then move/finalise all atoms
+together. Map each clip's Supabase fields (slug, camera, shoot_day, relay_group,
+start_tc) → `--tag`/`--tape`/`-y`. Carry over audio copy/byte-swap rules (now →
+WAV), LUT, relay concat, per-clip checkpoints. **ALE for Avid becomes redundant**
+(metadata is embedded); keep FCPXML for Resolve. Locate raw2bmx via a configured
+path to `tools/bmx/.../raw2bmx.exe`.
 
 ---
 
